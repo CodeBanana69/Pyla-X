@@ -1,0 +1,143 @@
+{
+  "cases": [
+    {
+      "id": "stationary",
+      "shooter": [0, 0],
+      "target": [300, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 150,
+      "shooter_speed": 0,
+      "projectile_radius": 0,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [300, 0],
+      "time": 2.0
+    },
+    {
+      "id": "stationary_radius",
+      "shooter": [0, 0],
+      "target": [300, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 150,
+      "projectile_radius": 60,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [300, 0],
+      "time": 1.6
+    },
+    {
+      "id": "shooter_speed_toward_target",
+      "shooter": [0, 0],
+      "target": [300, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 150,
+      "shooter_speed": 50,
+      "projectile_radius": 0,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [300, 0],
+      "time": 1.5
+    },
+    {
+      "id": "moving_toward",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [-40, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 0,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [71.42857142857143, 0],
+      "time": 0.7142857142857143
+    },
+    {
+      "id": "moving_away",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [40, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 0,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [166.66666666666666, 0],
+      "time": 1.6666666666666667
+    },
+    {
+      "id": "perpendicular",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [0, 50],
+      "projectile_speed": 100,
+      "projectile_radius": 0,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [100, 57.73502691896258],
+      "time": 1.1547005383792517
+    },
+    {
+      "id": "toward_with_radius",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [-40, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 10,
+      "max_range": 500,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [74.28571428571429, 0],
+      "time": 0.6428571428571429
+    },
+    {
+      "id": "too_fast",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [150, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 0,
+      "max_range": 1000,
+      "feasible": false,
+      "reason": "impossible_speed"
+    },
+    {
+      "id": "out_of_range",
+      "shooter": [0, 0],
+      "target": [300, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 150,
+      "projectile_radius": 0,
+      "max_range": 100,
+      "feasible": false,
+      "reason": "out_of_range"
+    },
+    {
+      "id": "radius_reaches_past_center_range",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 30,
+      "max_range": 80,
+      "feasible": true,
+      "reason": "ok",
+      "aim": [100, 0],
+      "time": 0.7
+    },
+    {
+      "id": "radius_still_out_of_range",
+      "shooter": [0, 0],
+      "target": [100, 0],
+      "target_velocity": [0, 0],
+      "projectile_speed": 100,
+      "projectile_radius": 30,
+      "max_range": 50,
+      "feasible": false,
+      "reason": "out_of_range"
+    }
+  ]
+}

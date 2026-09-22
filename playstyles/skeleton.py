@@ -189,3 +189,23 @@ def is_enemy_hittable(
 def rotate_movement(move_str: str, angle_radian: float) -> str:
     """Rotates the movement keys by a given angle in radians."""
     return ""
+
+def predict_aim(target_pos: Tuple[float, float], target_velocity: Optional[Tuple[float, float]] = None, skill_type: str = "attack") -> Dict[str, Any]:
+    """Lead a shot from target velocity, projectile speed, shooter speed, and projectile size.
+
+    Throwers return an arc trajectory. Nani's attack returns a three-orb return path,
+    and Nani's super returns a curved Peep path. Impossible shots set feasible to False.
+    """
+    return {"feasible": False, "aim_point": None, "reason": "invalid", "trajectory": "linear", "in_range": False}
+
+def aim_attack(solution: Dict[str, Any]) -> bool:
+    """Drag the attack stick along solution['aim_vector'] when the shot is feasible."""
+    return False
+
+def aim_super(solution: Dict[str, Any]) -> bool:
+    """Drag the super stick along solution['aim_vector'] when the shot is feasible."""
+    return False
+
+def current_aim_delay() -> float:
+    """Seconds of capture plus input delay. The configured default is used before any measurement."""
+    return 0.1

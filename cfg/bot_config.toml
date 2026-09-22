@@ -14,3 +14,5 @@ state_detection_confidence = 0.75
 seconds_to_hold_attack_after_reaching_max = 1.5
 play_again_on_win = "no"
 current_playstyle = "showdown_survivor.pyla"
+aim_default_delay = 0.1
+aim_max_delay = 0.35

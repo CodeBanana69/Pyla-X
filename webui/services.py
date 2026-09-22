@@ -62,6 +62,7 @@ class WebDataService:
         "emulator_port": ("int", 5037),
         "trophies_multiplier": ("int", 1),
         "auto_load_queue_on_startup": ("bool", True),
+        "capture_backend": ("str", "scrcpy"),
     }
 
     DEBUG_FIELDS: dict[str, tuple[str, Any]] = {
@@ -89,6 +90,8 @@ class WebDataService:
         "super_pixels_minimum": ("float", 1800.0),
         "gadget_pixels_minimum": ("float", 1300.0),
         "hypercharge_pixels_minimum": ("float", 1800.0),
+        "aim_default_delay": ("float", 0.1),
+        "aim_max_delay": ("float", 0.35),
     }
 
     TIMER_FIELDS: dict[str, tuple[str, Any]] = {
