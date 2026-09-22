@@ -66,22 +66,36 @@ class RuntimeControl:
         self._state_callback = state_callback
         self._stop_event = threading.Event()
         self._pause_requested = threading.Event()
+        self._immediate = threading.Event()
 
-    def request_pause(self):
+    def request_pause(self, immediate: bool = False):
         self._pause_requested.set()
+        if immediate:
+            self._immediate.set()
+        else:
+            self._immediate.clear()
 
     def resume(self):
         self._pause_requested.clear()
+        self._immediate.clear()
 
-    def request_stop(self):
+    def request_stop(self, immediate: bool = False):
+        keep_immediate = bool(immediate) or self._immediate.is_set()
         self._stop_event.set()
         self._pause_requested.clear()
+        if keep_immediate:
+            self._immediate.set()
+        else:
+            self._immediate.clear()
 
     def should_stop(self) -> bool:
         return self._stop_event.is_set()
 
     def should_pause(self) -> bool:
         return self._pause_requested.is_set() and not self._stop_event.is_set()
+
+    def interrupts_immediately(self) -> bool:
+        return self._immediate.is_set() and (self.should_stop() or self.should_pause())
 
     def mark_running(self):
         self._state_callback("running")
@@ -122,11 +136,13 @@ class RuntimeManager:
                 self._thread = None
                 self.rt_control = None
                 self._session_started_at = None
+            immediate = bool(thread_alive and self.rt_control and self.rt_control.interrupts_immediately())
             return {
                 "state": self._state,
                 "is_running": thread_alive,
                 "last_error": self._last_error,
                 "session_started_at": self._session_started_at if thread_alive else None,
+                "immediate": immediate,
             }
 
     def start(self, queue_data: list[dict[str, Any]], discord_bot) -> dict[str, Any]:
@@ -205,34 +221,64 @@ class RuntimeManager:
                 self.rt_control = None
                 self._session_started_at = None
 
-    def pause(self) -> dict[str, Any]:
+    def pause(self, immediate: bool = False) -> dict[str, Any]:
         with self._lock:
             thread_alive = self._thread.is_alive() if self._thread else False
             if not thread_alive or not self.rt_control:
-                return {"ok": False, "message": "Pyla is not running."}
+                return {"ok": False, "message": "Pyla is not running.", "immediate": False}
 
             if self._state == "running":
-                self.rt_control.request_pause()
+                self.rt_control.request_pause(immediate=immediate)
                 self._state = "pausing"
-                return {"ok": True, "message": "Pause requested. Pyla will pause in the lobby."}
+                if self.rt_control.interrupts_immediately():
+                    return {
+                        "ok": True,
+                        "message": "Force pause requested. Pyla will pause immediately.",
+                        "immediate": True,
+                    }
+                return {
+                    "ok": True,
+                    "message": "Pause requested. Pyla will pause in the lobby.",
+                    "immediate": False,
+                }
 
-            if self._state in {"pausing", "paused"}:
-                return {"ok": True, "message": "Pause already requested."}
+            if self._state == "pausing":
+                if immediate:
+                    self.rt_control.request_pause(immediate=True)
+                    return {
+                        "ok": True,
+                        "message": "Force pause requested. Pyla will pause immediately.",
+                        "immediate": True,
+                    }
+                return {
+                    "ok": True,
+                    "message": "Pause already requested.",
+                    "immediate": self.rt_control.interrupts_immediately(),
+                }
 
-            return {"ok": False, "message": f"Pyla cannot pause while state is {self._state}."}
+            if self._state == "paused":
+                return {"ok": True, "message": "Pause already requested.", "immediate": False}
 
-    def stop(self) -> dict[str, Any]:
+            return {"ok": False, "message": f"Pyla cannot pause while state is {self._state}.", "immediate": False}
+
+    def stop(self, immediate: bool = False) -> dict[str, Any]:
         with self._lock:
             thread_alive = self._thread.is_alive() if self._thread else False
             if not thread_alive or not self.rt_control:
                 self._state = "idle"
                 self._session_started_at = None
-                return {"ok": True, "message": "Pyla is already stopped."}
+                return {"ok": True, "message": "Pyla is already stopped.", "immediate": False}
 
             thread = self._thread
             was_paused = self._state == "paused"
-            self.rt_control.request_stop()
+            self.rt_control.request_stop(immediate=immediate)
+            immediate_now = self.rt_control.interrupts_immediately()
             self._state = "stopping"
+            message = (
+                "Force stop requested. Pyla is shutting down."
+                if immediate_now
+                else "Stop requested. Pyla is shutting down."
+            )
 
         if was_paused and thread:
             thread.join(timeout=2)
@@ -246,10 +292,10 @@ class RuntimeManager:
                         self._state = "idle"
                         stopped_state = "idle"
                 if stopped_state == "error":
-                    return {"ok": False, "message": self._last_error or "Pyla stopped with an error."}
-                return {"ok": True, "message": "Pyla stopped."}
+                    return {"ok": False, "message": self._last_error or "Pyla stopped with an error.", "immediate": immediate_now}
+                return {"ok": True, "message": "Pyla stopped.", "immediate": immediate_now}
 
-        return {"ok": True, "message": "Stop requested. Pyla is shutting down."}
+        return {"ok": True, "message": message, "immediate": immediate_now}
 
     def get_logs(self) -> list[str]:
         with GLOBAL_LOGS_LOCK:

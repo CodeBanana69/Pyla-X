@@ -10,6 +10,7 @@ from typing import Any
 from packaging import version
 from werkzeug.utils import secure_filename
 
+from .history_filter import in_inclusive_date_range
 from utils import (
     api_base_url,
     clean_queue,
@@ -72,6 +73,7 @@ class WebDataService:
         "debug_view_fps": ("int", 30),
         "advanced_debug_visuals": ("bool", False),
         "record_debug_preview_clips": ("bool", False),
+        "record_normal_clips": ("bool", False),
     }
 
     BOT_FIELDS: dict[str, tuple[str, Any]] = {
@@ -763,9 +765,7 @@ class WebDataService:
                         session_summary["total_matches"] += 1
 
                 played_on = played_at.date() if played_at else None
-                if start_date and (played_on is None or played_on < start_date):
-                    continue
-                if end_date and (played_on is None or played_on > end_date):
+                if not in_inclusive_date_range(played_on, start_date, end_date):
                     continue
 
                 item = grouped.setdefault(brawler, {

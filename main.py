@@ -1,8 +1,6 @@
-import argparse
 import inspect
 import os
 import sys
-import tomllib
 from pathlib import Path
 
 # Monkey-patch inspect.getfile to prevent Nuitka + PyTorch crash
@@ -30,45 +28,8 @@ if __name__ == "__main__" and len(sys.argv) >= 9 and sys.argv[1] == "--debug-vie
     )
     sys.exit(0)
 
-def parse_cli_args(argv=None):
-    parser = argparse.ArgumentParser(
-        prog="PylaAI",
-        description="PylaAI, the best free and open source brawl stars bot.",
-    )
-    parser.add_argument(
-        "--no-console",
-        action="store_true",
-        help="Hide PylaAI's own console and write output to a log file.",
-    )
-    interface_group = parser.add_mutually_exclusive_group()
-    interface_group.add_argument(
-        "--desktop",
-        dest="interface_mode",
-        action="store_const",
-        const="desktop",
-        help="Force the UI to open in the integrated pywebview window.",
-    )
-    interface_group.add_argument(
-        "--web",
-        "--browser",
-        "--no-webapp",
-        dest="interface_mode",
-        action="store_const",
-        const="browser",
-        help="Force the UI to open in the system browser instead of pywebview.",
-    )
-    interface_group.add_argument(
-        "--headless",
-        dest="interface_mode",
-        action="store_const",
-        const="headless",
-        help="Force headless mode: serve the local web UI without opening it.",
-    )
-    args, _unknown_args = parser.parse_known_args(argv)
-    return args
-
-
-INTERFACE_MODES = frozenset({"desktop", "browser", "headless"})
+from control_loop import control_action
+from interface_launch import parse_cli_args, resolve_interface_mode
 
 
 def _startup_project_root():
@@ -77,29 +38,10 @@ def _startup_project_root():
     return Path.cwd().resolve()
 
 
-def load_saved_interface_mode(config_path=None):
-    path = Path(config_path) if config_path is not None else _startup_project_root() / "cfg" / "general_config.toml"
-    try:
-        with path.open("rb") as config_file:
-            configured_mode = str(tomllib.load(config_file).get("interface_mode", "desktop")).strip().lower()
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        print(f"Could not read interface_mode from {path}: {error}. Using desktop mode.")
-        return "desktop"
-
-    if configured_mode not in INTERFACE_MODES:
-        print(f"Unknown interface_mode {configured_mode!r} in {path}. Using desktop mode.")
-        return "desktop"
-    return configured_mode
-
-
-def resolve_interface_mode(cli_args, config_path=None):
-    return cli_args.interface_mode or load_saved_interface_mode(config_path)
-
-
 # Parse these before the heavy application imports so console hiding happens as
 # early as possible. Imported modules receive harmless default values.
 CLI_ARGS = parse_cli_args(sys.argv[1:] if __name__ == "__main__" else [])
-INTERFACE_MODE = resolve_interface_mode(CLI_ARGS)
+INTERFACE_MODE = resolve_interface_mode(CLI_ARGS, _startup_project_root() / "cfg" / "general_config.toml")
 CONSOLE_HIDDEN = False
 CONSOLE_LOG_FILE = None
 
@@ -309,7 +251,10 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
 
             self.window_controller.release_movement()
             self.runtime_control.mark_paused()
-            cprint("Pyla is paused in the lobby. Waiting for Start to resume.", "#AAE5A4")
+            if self.runtime_control.interrupts_immediately():
+                cprint("Pyla paused immediately. Waiting for Start to resume.", "#AAE5A4")
+            else:
+                cprint("Pyla is paused in the lobby. Waiting for Start to resume.", "#AAE5A4")
 
             while self.should_pause() and not self.should_stop():
                 state = self.get_latest_state()
@@ -324,6 +269,14 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                 self.runtime_control.mark_running()
                 self.time_since_last_webhook_ping = time.time()
                 print("Pause released, resuming run.")
+
+        def control_decision(self):
+            return control_action(
+                self.get_latest_state(),
+                stop_requested=self.should_stop(),
+                pause_requested=self.should_pause(),
+                immediate=bool(self.runtime_control and self.runtime_control.interrupts_immediately()),
+            )
 
         def handle_pause_request(self):
             if self.should_pause() and not self.should_stop():
@@ -377,18 +330,17 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                 self.runtime_control.mark_running()
 
             while True:
-                if self.get_latest_state() == "lobby":
+                action = self.control_decision()
+                if action == "stop":
+                    self.stop_gracefully()
+                    break
+                if action == "pause":
+                    self.handle_pause_request()
                     if self.should_stop():
                         self.stop_gracefully()
                         break
-
                     if self.should_pause():
-                        self.handle_pause_request()
-                        if self.should_stop():
-                            self.stop_gracefully()
-                            break
-                        if self.should_pause():
-                            continue
+                        continue
 
                 if not self.picked_first_brawler and self.get_latest_state() == "lobby":
                     if self.Stage_manager.brawlers_pick_data[0]['automatically_pick']:

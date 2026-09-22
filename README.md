@@ -46,11 +46,23 @@ python main.py
 
 ### Startup options
 
+PylaAI can run as its own desktop window (pywebview), in the system browser, or headless. A command-line flag overrides `interface_mode` in `cfg/general_config.toml` (`desktop`, `browser`, or `headless`).
+
 | Flag | Effect |
 | --- | --- |
-| *(none)* | Console visible, UI in the Pyla desktop window |
+| *(none)* | Console visible. Opens the native desktop window when pywebview is available, otherwise the system browser. |
+| `--desktop` | Force the integrated pywebview desktop window. |
+| `--web`, `--browser`, `--no-webapp` | Open the UI in the system browser instead of the desktop window. |
+| `--headless` | Serve the local web UI without opening a window or browser. Open the printed localhost URL yourself. |
 | `--no-console` | Hides the console window, output goes to `pyla.log` in the current folder. Ignored when Pyla is started from an existing terminal, so your own terminal is never hidden. |
-| `--no-webapp` | Opens the UI in the default browser instead of the desktop window |
+
+Examples:
+
+```sh
+python main.py --desktop
+python main.py --headless --no-console
+python main.py --no-webapp
+```
 
 
 ## License

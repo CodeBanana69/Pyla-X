@@ -86,6 +86,7 @@ const state = {
     historyChartRange: "recent",
     activeHistoryBrawler: null,
     settingsSearch: "",
+    forceRuntime: getStorageItem("forceRuntime", "false") === "true",
     playstyleSearch: "",
     playstyleFilter: "all",
     expandedPlaystyleDescriptions: new Set(),
@@ -130,6 +131,7 @@ const SETTINGS_META = {
         { key: "debug_view", label: "Debug View", type: "checkbox", help: "Show the latest bot frame in a separate low-latency window." },
         { key: "debug_view_fps", label: "Debug View FPS", type: "number", help: "Maximum FPS for the debug window. Lower this if it costs too much performance." },
         { key: "advanced_debug_visuals", label: "Advanced Debug Visuals", type: "checkbox", visibleIf: { key: "debug_view", value: true }, help: "Show hit circles, line-of-sight links, and joystick path sectors in the debug window." },
+        { key: "record_normal_clips", label: "Record Clips", type: "checkbox", help: "Save MP4 clips of clean gameplay when the player is tracked and then lost. Debug overlays are never included." },
         { key: "record_debug_preview_clips", label: "Record Debug Preview As Clips", type: "checkbox", visibleIf: { key: "debug_view", value: true }, help: "Save MP4 clips of the debug preview when the player is tracked and then lost." },
     ],
     bot: [
@@ -455,9 +457,13 @@ function renderDashboard() {
     const statusCopy = runtime.state === "error"
         ? (runtime.last_error || "Pyla stopped with an error.")
         : runtime.state === "pausing"
-            ? "Pause requested. Pyla will stop in the lobby."
+            ? (runtime.immediate
+                ? "Force pause requested. Pyla will pause immediately."
+                : "Pause requested. Pyla will pause in the lobby.")
             : runtime.state === "stopping"
-                ? "Pyla is shutting down. This should only take a few seconds."
+                ? (runtime.immediate
+                    ? "Force stop requested. Pyla is shutting down."
+                    : "Stop requested. Waiting for the lobby; force it now if Pyla is stuck.")
                 : isPaused
                     ? "Pyla is paused. Press Start to resume."
                     : canStart
@@ -479,16 +485,18 @@ function renderDashboard() {
             <button class="btn btn-huge runtime-transition-button is-stopping" type="button" disabled aria-live="polite">
                 <span class="runtime-transition-icon">${iconMarkup("stop")}</span><span>Stopping…</span>
             </button>
-            <p class="runtime-note">${escapeHtml(statusCopy)}</p>`;
+            <p class="runtime-note">${escapeHtml(statusCopy)}</p>
+            ${renderRuntimeForceRow(runtime)}`;
     } else if (["running", "pausing"].includes(runtime.state)) {
         runtimePanel = `
             <div class="runtime-live-shell">
-                <h3 class="runtime-live-title">${runtime.state === "pausing" ? "PylaAI is pausing" : "PylaAI is currently running"}</h3>
+                <h3 class="runtime-live-title">${runtime.state === "pausing" ? (runtime.immediate ? "PylaAI is force pausing" : "PylaAI is pausing") : "PylaAI is currently running"}</h3>
                 <p class="runtime-note">${escapeHtml(statusCopy)}</p>
                 <div class="runtime-action-grid">
-                    <button id="pauseRuntimeBtn" class="btn btn-primary btn-runtime-action ${runtime.state === "pausing" ? "runtime-transition-button is-pausing is-disabled" : ""}">${iconMarkup("pause")} Pause</button>
+                    <button id="pauseRuntimeBtn" class="btn btn-primary btn-runtime-action ${runtime.state === "pausing" ? "runtime-transition-button is-pausing is-disabled" : ""}">${iconMarkup("pause")} ${runtime.state === "pausing" && runtime.immediate ? "Force Pause" : "Pause"}</button>
                     <button id="stopRuntimeBtn" class="btn btn-runtime-action">${iconMarkup("stop")} Stop</button>
                 </div>
+                ${renderRuntimeForceRow(runtime)}
             </div>`;
     } else if (isPaused) {
         runtimePanel = `
@@ -499,6 +507,7 @@ function renderDashboard() {
                     <button id="resumeRuntimeBtn" class="btn btn-primary btn-runtime-action">${iconMarkup("play")} Start</button>
                     <button id="stopRuntimeBtn" class="btn btn-runtime-action">${iconMarkup("stop")} Stop</button>
                 </div>
+                ${renderRuntimeForceRow(runtime)}
             </div>`;
     }
 
@@ -1789,7 +1798,7 @@ function renderSettingField(section, field, value) {
     if (field.type === "checkbox") {
         const isPremiumLocked = !state.bootstrap?.auth?.premium && (field.key === "advanced_debug_visuals" || field.key === "recover_when_wrong_brawler_used");
         return `
-            <div class="setting-row check-card check-card-right ${isPremiumLocked ? "setting-locked premium-locked-action" : ""}">
+            <div class="setting-row check-card check-card-right ${isPremiumLocked ? "setting-locked premium-locked-action" : ""}" data-search-text="${escapeHtml(settingSearchText(section, field))}">
                 <div class="check-info">
                     <strong style="display: flex; align-items: center; gap: 6px;">
                         <label for="chk-${section}-${field.key}" style="cursor: pointer; user-select: none;">
@@ -1811,7 +1820,7 @@ function renderSettingField(section, field, value) {
 
     if (field.type === "select") {
         return `
-            <div class="setting-row ${field.emphasis ? "setting-emphasis" : ""}">
+            <div class="setting-row ${field.emphasis ? "setting-emphasis" : ""}" data-search-text="${escapeHtml(settingSearchText(section, field))}">
                 <div class="setting-copy">
                     <div class="setting-label" style="display: flex; align-items: center; gap: 6px;">
                         <strong>${escapeHtml(field.label)}</strong>
@@ -1837,7 +1846,7 @@ function renderSettingField(section, field, value) {
         ? `Configured (${secretStatus.masked || "hidden"}) - enter a replacement`
         : field.placeholder || "";
     return `
-        <div class="setting-row ${field.emphasis ? "setting-emphasis" : ""} ${isPremiumLocked ? "setting-locked premium-locked-action" : ""}">
+        <div class="setting-row ${field.emphasis ? "setting-emphasis" : ""} ${isPremiumLocked ? "setting-locked premium-locked-action" : ""}" data-search-text="${escapeHtml(settingSearchText(section, field))}">
             <div class="setting-copy">
                 <div class="setting-label" style="display: flex; align-items: center; gap: 6px;">
                     <strong>${escapeHtml(field.label)} ${isPremiumLocked ? `<span class="premium-badge-inline">Premium</span>` : ""}</strong>
@@ -1866,7 +1875,7 @@ function shouldRenderSettingField(section, field) {
 
 function renderTimerField(field, value) {
     return `
-        <div class="timer-box">
+        <div class="timer-box" data-search-text="${escapeHtml(settingSearchText("timers", field))}">
             <div class="timer-header">
                 <div>
                     <h5 style="display: flex; align-items: center; gap: 6px;">
@@ -1965,7 +1974,30 @@ function renderQueueStrip(queue) {
 
 
 
+function renderRuntimeForceRow(runtime) {
+    const showForcePause = runtime.state === "pausing" && !runtime.immediate;
+    const showForceStop = runtime.state === "stopping" && !runtime.immediate;
+    return `
+        <div class="runtime-force-row">
+            <label class="force-toggle-label ${state.forceRuntime ? "is-active" : ""}" title="When enabled, Pause and Stop take effect immediately without waiting for the lobby.">
+                <input id="forceRuntimeToggle" type="checkbox" ${state.forceRuntime ? "checked" : ""}>
+                <span class="force-toggle-switch"></span>
+                <span class="force-toggle-text">Force</span>
+            </label>
+        </div>
+        <p class="runtime-note">When enabled, Pause and Stop take effect immediately without waiting for the lobby.</p>
+        ${showForcePause ? `<button id="forcePauseRuntimeBtn" class="btn btn-runtime-action" type="button">${iconMarkup("pause")} Force Pause Now</button>` : ""}
+        ${showForceStop ? `<button id="forceStopRuntimeBtn" class="btn btn-runtime-action" type="button">${iconMarkup("stop")} Force Stop Now</button>` : ""}
+    `;
+}
+
 function bindRuntimeButtons() {
+    const postRuntime = (path, immediate) => fetchJSON(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ immediate: Boolean(immediate) }),
+    }, true);
+
     const startOrResume = async () => {
         const result = await fetchJSON("/api/runtime/start", { method: "POST" }, true);
         if (!result.ok) {
@@ -1983,12 +2015,18 @@ function bindRuntimeButtons() {
         await startOrResume();
     });
     document.getElementById("resumeRuntimeBtn")?.addEventListener("click", startOrResume);
+    document.getElementById("forceRuntimeToggle")?.addEventListener("change", (event) => {
+        state.forceRuntime = Boolean(event.target.checked);
+        setStorageItem("forceRuntime", state.forceRuntime ? "true" : "false");
+        event.target.closest(".force-toggle-label")?.classList.toggle("is-active", state.forceRuntime);
+    });
     document.getElementById("pauseRuntimeBtn")?.addEventListener("click", async (event) => {
         if (event.currentTarget.classList.contains("is-disabled")) return;
+        const immediate = state.forceRuntime;
         const previousRuntime = state.bootstrap.runtime;
-        state.bootstrap.runtime = { ...previousRuntime, state: "pausing" };
+        state.bootstrap.runtime = { ...previousRuntime, state: "pausing", immediate };
         renderDashboard();
-        const result = await fetchJSON("/api/runtime/pause", { method: "POST" }, true);
+        const result = await postRuntime("/api/runtime/pause", immediate);
         if (!result.ok) {
             state.bootstrap.runtime = previousRuntime;
             renderDashboard();
@@ -2000,11 +2038,28 @@ function bindRuntimeButtons() {
         renderQueueDock();
         showToast(result.message || "Pause requested.", "success");
     });
-    document.getElementById("stopRuntimeBtn")?.addEventListener("click", async () => {
+    document.getElementById("forcePauseRuntimeBtn")?.addEventListener("click", async () => {
         const previousRuntime = state.bootstrap.runtime;
-        state.bootstrap.runtime = { ...previousRuntime, state: "stopping" };
+        state.bootstrap.runtime = { ...previousRuntime, state: "pausing", immediate: true };
         renderDashboard();
-        const result = await fetchJSON("/api/runtime/stop", { method: "POST" }, true);
+        const result = await postRuntime("/api/runtime/pause", true);
+        if (!result.ok) {
+            state.bootstrap.runtime = previousRuntime;
+            renderDashboard();
+            showToast(result.message || "Unable to pause Pyla.", "error");
+            return;
+        }
+        state.bootstrap.runtime = result.runtime;
+        renderDashboard();
+        renderQueueDock();
+        showToast(result.message || "Force pause requested.", "success");
+    });
+    document.getElementById("stopRuntimeBtn")?.addEventListener("click", async () => {
+        const immediate = state.forceRuntime;
+        const previousRuntime = state.bootstrap.runtime;
+        state.bootstrap.runtime = { ...previousRuntime, state: "stopping", immediate };
+        renderDashboard();
+        const result = await postRuntime("/api/runtime/stop", immediate);
         if (!result.ok) {
             state.bootstrap.runtime = previousRuntime;
             renderDashboard();
@@ -2015,6 +2070,22 @@ function bindRuntimeButtons() {
         renderDashboard();
         renderQueueDock();
         showToast(result.message || "Stop requested.", "success");
+    });
+    document.getElementById("forceStopRuntimeBtn")?.addEventListener("click", async () => {
+        const previousRuntime = state.bootstrap.runtime;
+        state.bootstrap.runtime = { ...previousRuntime, state: "stopping", immediate: true };
+        renderDashboard();
+        const result = await postRuntime("/api/runtime/stop", true);
+        if (!result.ok) {
+            state.bootstrap.runtime = previousRuntime;
+            renderDashboard();
+            showToast(result.message || "Unable to stop Pyla.", "error");
+            return;
+        }
+        state.bootstrap.runtime = result.runtime;
+        renderDashboard();
+        renderQueueDock();
+        showToast(result.message || "Force stop requested.", "success");
     });
 }
 
@@ -3026,15 +3097,34 @@ function collectSectionPayload(section) {
     return payload;
 }
 
-function applySettingsSearch(query) {
+function settingSearchText(section, field) {
+    // Keep token matching aligned with webui/settings_search.py.
+    const sectionLabel = {
+        general: "General Runtime and environment",
+        bot: "Behavior Combat and recovery",
+        timers: "Timers Timing controls",
+        webhook: "Integrations Webhook",
+        debug: "Debug Diagnostics",
+    }[section] || section || "";
+    const optionText = (field.options || []).map((option) => `${option.label || ""} ${option.value || ""}`).join(" ");
+    return [sectionLabel, field.label, field.key, field.help, field.description, optionText].filter(Boolean).join(" ");
+}
+
+function settingMatchesQuery(searchText, query) {
     const normalized = String(query || "").trim().toLowerCase();
+    if (!normalized) return true;
+    const haystack = String(searchText || "").toLowerCase();
+    return normalized.split(/\s+/).every((token) => haystack.includes(token));
+}
+
+function applySettingsSearch(query) {
     const sections = Array.from(document.querySelectorAll("#view-settings .settings-section"));
     let visibleSettings = 0;
 
     sections.forEach((section) => {
         const rows = Array.from(section.querySelectorAll(".setting-row, .timer-box"));
         rows.forEach((row) => {
-            const matches = !normalized || row.textContent.toLowerCase().includes(normalized);
+            const matches = settingMatchesQuery(row.dataset.searchText || row.textContent, query);
             row.classList.toggle("settings-search-hidden", !matches);
             if (matches) visibleSettings += 1;
         });

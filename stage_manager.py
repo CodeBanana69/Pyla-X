@@ -2,6 +2,7 @@ import sys
 import time
 import cv2
 
+from control_loop import control_action
 from state_finder import find_popup_close, get_state, is_underdog
 from trophy_observer import TrophyObserver, MatchResult
 from utils import find_template_center, load_toml_as_dict, notify_user, save_brawler_data
@@ -62,6 +63,25 @@ class StageManager:
 
     def _should_pause(self):
         return bool(self.runtime_control and self.runtime_control.should_pause())
+
+    def _immediate_interrupt(self):
+        if not self.runtime_control:
+            return False
+        action = control_action(
+            "match",
+            stop_requested=self.runtime_control.should_stop(),
+            pause_requested=self.runtime_control.should_pause(),
+            immediate=self.runtime_control.interrupts_immediately(),
+        )
+        return action in {"stop", "pause"}
+
+    def _wait_for_immediate(self, duration):
+        end_time = time.time() + duration
+        while time.time() < end_time:
+            if self._immediate_interrupt():
+                return True
+            time.sleep(min(0.05, max(end_time - time.time(), 0)))
+        return False
 
     def _sleep_interruptible(self, duration, allow_pause=True, poll_interval=0.1):
         end_time = time.time() + duration
@@ -156,7 +176,9 @@ class StageManager:
         self.window_controller.release_movement()
         self.window_controller.press("proceed")
         print("Pressed to start a match")
-        time.sleep(2)
+        if self._wait_for_immediate(2):
+            self.window_controller.release_movement()
+            return
 
     def click_star_drop(self, drop_type="regular"):
         if hasattr(self, '_star_drop_thread') and self._star_drop_thread.is_alive():
@@ -182,6 +204,10 @@ class StageManager:
         end_screen_time = time.time()
         parsed_result = None
         while current_state.startswith("end") and time.time() - end_screen_time < 35:
+            if self._immediate_interrupt():
+                print("End screen interrupted by an immediate stop or pause.")
+                self.window_controller.release_movement()
+                return
 
             if time.time() - self.time_since_last_stat_change > 25 and parsed_result is None :
                 raw_found_result = '_'.join(current_state.split("_")[1:])
@@ -212,7 +238,10 @@ class StageManager:
                 print("Game has ended, proceeding")
                 self.window_controller.press("proceed")
 
-            time.sleep(3)
+            if self._wait_for_immediate(3):
+                print("End screen interrupted by an immediate stop or pause.")
+                self.window_controller.release_movement()
+                return
             screenshot = self.window_controller.screenshot()
             current_state = get_state(screenshot)
 

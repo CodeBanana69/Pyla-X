@@ -11,6 +11,8 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 
+from clip_recorder import ClipRecorder, clip_outputs_for_tick
+
 
 DEFAULT_DEBUG_VIEW_FPS = 30
 DEBUG_DATA_SIZE = 262144
@@ -329,114 +331,19 @@ def draw_poison_gas_lines(image, player_boxes, poison_gas):
         cv2.line(image, (center_x, center_y), (min(image.shape[1] - 1, x2 + player_width), center_y), line_color, line_thickness)
 
 
-class DebugClipRecorder:
+class DebugClipRecorder(ClipRecorder):
+    """Record debug-preview frames, including overlay graphics."""
+
     def __init__(self, width, height, fps=30.0, missing_player_grace=1.0, min_player_seen_before_recording=3.0):
-        self.width = int(width)
-        self.height = int(height)
-        self.fps = float(fps)
-        self.missing_player_grace = float(missing_player_grace)
-        self.min_player_seen_before_recording = float(min_player_seen_before_recording)
-        self.writer = None
-        self.path = None
-        self.frames_written = 0
-        self.player_seen_since = None
-        self.last_player_seen = None
-        self.last_frame_written_at = None
-        self.pending_frames = []
-
-    def update(self, image, debug_data, frame_advanced):
-        if not debug_data or not frame_advanced:
-            return
-
-        now = time.time()
-        player_detected = bool(debug_data.get("player"))
-        if player_detected:
-            if self.player_seen_since is None:
-                self.player_seen_since = now
-            self.last_player_seen = now
-            if self.writer is None and now - self.player_seen_since >= self.min_player_seen_before_recording:
-                self.start(now)
-                self.flush_pending_frames()
-        else:
-            self.player_seen_since = None
-
-        if self.writer is None:
-            if player_detected:
-                self.pending_frames.append((now, image.copy()))
-                self.prune_pending_frames(now)
-            else:
-                self.pending_frames.clear()
-            return
-
-        self.write_frame(image, now)
-
-        if (
-            not player_detected
-            and self.last_player_seen is not None
-            and now - self.last_player_seen > self.missing_player_grace
-        ):
-            self.stop()
-
-    def write_frame(self, image, timestamp):
-        if self.last_frame_written_at is None:
-            frames_to_write = 1
-        else:
-            elapsed = max(timestamp - self.last_frame_written_at, 0)
-            frames_to_write = max(1, int(round(elapsed * self.fps)))
-            frames_to_write = min(frames_to_write, int(max(self.fps * 2, 1)))
-
-        for _ in range(frames_to_write):
-            self.writer.write(image)
-            self.frames_written += 1
-        self.last_frame_written_at = timestamp
-
-    def prune_pending_frames(self, now):
-        keep_seconds = self.min_player_seen_before_recording + self.missing_player_grace
-        self.pending_frames = [
-            (timestamp, frame)
-            for timestamp, frame in self.pending_frames
-            if now - timestamp <= keep_seconds
-        ]
-
-    def flush_pending_frames(self):
-        for timestamp, frame in self.pending_frames:
-            self.write_frame(frame, timestamp)
-        self.pending_frames.clear()
-
-    def start(self, now):
-        clip_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_frames", "clips")
-        os.makedirs(clip_dir, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
-        self.path = os.path.join(clip_dir, f"debug_clip_{timestamp}.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self.writer = cv2.VideoWriter(self.path, fourcc, self.fps, (self.width, self.height))
-        self.frames_written = 0
-        self.last_frame_written_at = None
-        if not self.writer.isOpened():
-            print(f"Debug clip recorder could not open {self.path}")
-            self.writer.release()
-            self.writer = None
-            self.path = None
-
-    def stop(self):
-        if self.writer is None:
-            return
-
-        self.writer.release()
-        saved_path = self.path
-        frames_written = self.frames_written
-        self.writer = None
-        self.path = None
-        self.frames_written = 0
-        self.player_seen_since = None
-        self.last_player_seen = None
-        self.last_frame_written_at = None
-        self.pending_frames.clear()
-        if frames_written:
-            print(f"Saved debug clip: {saved_path}")
-
-    def close(self):
-        self.stop()
+        super().__init__(
+            width=width,
+            height=height,
+            fps=fps,
+            missing_player_grace=missing_player_grace,
+            min_player_seen_before_recording=min_player_seen_before_recording,
+            filename_prefix="debug_clip",
+            output_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_frames", "clips"),
+        )
 
 
 def draw_joystick_path_probe(image, joystick, directions, joystick_radius):
@@ -573,9 +480,16 @@ def run_viewer_worker(
             frame_advanced = new_debug_data is not None
             if new_debug_data is not None:
                 debug_data = new_debug_data
+            clean_image = image.copy() if clip_recorder is not None else image
             draw_debug_data(image, debug_data, width, height)
             if clip_recorder is not None:
-                clip_recorder.update(image, debug_data, frame_advanced)
+                for _kind, clip_frame in clip_outputs_for_tick(
+                    clean_image,
+                    image,
+                    record_normal=False,
+                    record_debug=True,
+                ):
+                    clip_recorder.update(clip_frame, debug_data, frame_advanced)
             cv2.imshow(title, image)
             frames_shown += 1
 
