@@ -165,3 +165,64 @@ class LobbyAutomation:
 
         print(f"WARNING: Brawler '{brawler}' was not found after 100 scroll attempts.")
         return "failed"
+
+    def lobby_menu_text(self, frame=None):
+        """Latest non-blocking menu OCR, used to spot a dropped gamemode or Buffie."""
+        reader = self.ocr_reader
+        if frame is None:
+            frame = self.window_controller.screenshot()
+        if frame is None or reader is None:
+            return []
+        try:
+            if hasattr(reader, "read_screen_nowait"):
+                document = reader.read_screen_nowait(frame)
+            elif hasattr(reader, "read_screen_sync"):
+                document = reader.read_screen_sync(frame)
+            else:
+                document = None
+        except Exception as exc:
+            print(f"Lobby mode OCR failed: {exc}")
+            return []
+        if not isinstance(document, dict):
+            return []
+        return document.get("menu_text") or []
+
+    def perform_gamemode_switch(self, action):
+        if not action or not action.get("needed"):
+            return "not_needed"
+        click = action.get("click")
+        if isinstance(click, (list, tuple)) and len(click) >= 2:
+            self.window_controller.click(int(click[0]), int(click[1]))
+            return "clicked_label"
+        menu = load_toml_as_dict("cfg/buttons_config.toml").get("gamemode_menu")
+        if isinstance(menu, (list, tuple)) and len(menu) >= 2:
+            self.window_controller.click(menu[0], menu[1], already_include_ratio=False)
+            return "opened_menu"
+        print(
+            f"Requested gamemode switch from {action.get('detected')} "
+            f"to {action.get('configured')}, but no on-screen target was found."
+        )
+        return "requested"
+
+    def perform_buffie_action(self, action):
+        if not action:
+            return "none"
+        kind = action.get("action")
+        buttons = load_toml_as_dict("cfg/buttons_config.toml")
+        if kind == "click_machine":
+            coords = buttons.get("buffie_machine")
+            if isinstance(coords, (list, tuple)) and len(coords) >= 2:
+                self.window_controller.click(coords[0], coords[1], already_include_ratio=False)
+            return "click_machine"
+        if kind == "move_claw":
+            target = action.get("target")
+            if isinstance(target, (list, tuple)) and len(target) >= 2 and isinstance(target[0], (int, float)):
+                self.window_controller.click(int(target[0]), int(target[1]))
+            return "move_claw"
+        if kind == "release_claw":
+            self.window_controller.press("attack")
+            return "release_claw"
+        if kind == "collect":
+            self.window_controller.press("proceed")
+            return "collect"
+        return kind or "none"

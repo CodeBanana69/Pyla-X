@@ -189,3 +189,19 @@ def is_enemy_hittable(
 def rotate_movement(move_str: str, angle_radian: float) -> str:
     """Rotates the movement keys by a given angle in radians."""
     return ""
+
+def avoid_showdown_gas(player_box=None, safe_center=None, safe_radius=None, edge_margin=80) -> tuple:
+    """Movement away from showdown poison. Uses a safe-circle when one is passed, otherwise nearby gas pixels."""
+    return (0.0, 0.0)
+
+def focus_showdown_teammates(teammates=None, player_pos=None) -> tuple:
+    """Joystick vector that keeps the bot next to the closest showdown teammate."""
+    return (0.0, 0.0)
+
+def cage_escape_movement(player_pos=None, cages=None, map_center=None, walls=None) -> dict:
+    """When the player is inside a brawlball cage, movement and a path back to map center."""
+    return {"movement": (0.0, 0.0), "path": []}
+
+def clamp_world_target(point: tuple) -> tuple:
+    """Pull an aim or movement target back inside the knockout field or brawlball field-plus-goals."""
+    return (0.0, 0.0)

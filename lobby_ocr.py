@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from gameplay_safety import classify_lobby_mode
 from utils import load_toml_as_dict, normalize_brawler_filename
 
 # Shared menu and state OCR client. The in-game detector stays on
@@ -49,6 +50,7 @@ SCREEN_NAMES = {
     "end_trio_showdown_1",
     "end_trio_showdown_2",
     "end_trio_showdown_3",
+    "buffie",
     "unknown",
 }
 MATCH_RESULTS = {
@@ -306,6 +308,8 @@ def classify_menu_text(menu_text):
         return "shop"
     if "special offer" in joined or re.search(r"\boffer\b", joined):
         return "popup"
+    if "buffie" in joined or "claw machine" in joined:
+        return "buffie"
     return "unknown"
 
 
@@ -327,6 +331,7 @@ def screen_from_grounding(text, width, height):
         "match_result": match_result,
         "star_drop": star_drop,
         "underdog": "underdog" in joined,
+        "lobby_mode": classify_lobby_mode(menu_text),
         "source": OCR_SOURCE,
     }
 

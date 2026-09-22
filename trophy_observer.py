@@ -3,6 +3,12 @@ import os
 import secrets
 import time
 import requests
+from gameplay_safety import (
+    CLASSIC_LOSE_RANGES,
+    CLASSIC_WIN_RANGES,
+    SHOWDOWN_TRIO_RANGES,
+    compute_trophy_update,
+)
 from utils import load_toml_as_dict, save_dict_as_toml, api_base_url, hash_playstyle, PYLA_VERSION, resolve_project_path
 from enum import Enum
 from dataclasses import dataclass
@@ -71,27 +77,9 @@ class TrophyObserver:
         self.last_sent_index = len(self.match_history)
         self.win_streak = 0
         self.match_counter = 0  # New counter for the number of matches
-        self.trophy_lose_ranges = [(49, 0), (299, 1), (599, 2), (799, 3), (999, 4), (1099, 5), (1199, 6), (1299, 7),
-                                   (1499, 8), (1799, 9), (3999, 10), (float("inf"), 15)]
-        self.trophy_win_ranges = [(1999, 10), (2499, 8), (2799, 6), (2999, 4), (3099, 2), (float("inf"), 1)]
-        self.showdown_trio_ranges = [
-            (49, (11, 5, 5, 5)),
-            (99, (11, 5, 4, -1)),
-            (199, (11, 5, 3, -1)),
-            (299, (11, 5, 2, -1)),
-            (499, (11, 5, 2, -2)),
-            (599, (11, 5, 1, -2)),
-            (799, (11, 5, 1, -3)),
-            (999, (11, 5, 1, -4)),
-            (1099, (11, 5, 0, -6)),
-            (1199, (11, 5, 0, -7)),
-            (1299, (11, 5, 0, -8)),
-            (1499, (11, 5, 0, -9)),
-            (1799, (11, 5, -5, -10)),
-            (1999, (11, 5, -5, -11)),
-            (2199, (9, 4, -5, -11)),
-            (float("inf"), (9, 4, -5, -11)),
-        ]
+        self.trophy_lose_ranges = list(CLASSIC_LOSE_RANGES)
+        self.trophy_win_ranges = list(CLASSIC_WIN_RANGES)
+        self.showdown_trio_ranges = list(SHOWDOWN_TRIO_RANGES)
         self.trophies_multiplier = int(load_toml_as_dict("./cfg/general_config.toml")["trophies_multiplier"])
 
     def win_streak_gain(self):
@@ -244,38 +232,23 @@ class TrophyObserver:
         if self.current_trophies is None:
             self.current_trophies = 0
         old_trophies = self.current_trophies
-        if old_trophies >= 2000:
-            underdog = False
         old_win_streak = self.win_streak
-
-        if parsed_result.result == MatchResult.VICTORY:
-            self.win_streak += 1
-            if parsed_result.place is not None:
-                trophy_delta = self.calc_showdown_delta(parsed_result.place)
-            else:
-                trophy_delta = self.calc_win_increment(underdog)
-        elif parsed_result.result == MatchResult.DEFEAT:
-            if not underdog:
-                self.win_streak = 0
-            if parsed_result.place is not None:
-                trophy_delta = self.calc_showdown_delta(parsed_result.place)
-            else:
-                trophy_delta = -self.calc_lost_decrement(underdog)
-        elif parsed_result.result == MatchResult.DRAW:
-            if parsed_result.place is not None:
-                trophy_delta = self.calc_showdown_delta(parsed_result.place)
-            else:
-                print("Nothing changed. Draw detected")
-                trophy_delta = self.calc_draw_increment(underdog)
-        else:
-            print("Catastrophic failure")
-            trophy_delta = 0
-        if self.current_trophies >= 1000 and self.current_trophies + trophy_delta < 1000:
-            self.current_trophies = 1000
-        elif self.current_trophies >= 2000 and self.current_trophies + trophy_delta < 2000:
-            self.current_trophies = 2000
-        else:
-            self.current_trophies += trophy_delta
+        update = compute_trophy_update(
+            result=parsed_result.result,
+            trophies=old_trophies,
+            win_streak=old_win_streak,
+            underdog=underdog,
+            place=parsed_result.place,
+            multiplier=self.trophies_multiplier,
+            win_ranges=self.trophy_win_ranges,
+            lose_ranges=self.trophy_lose_ranges,
+            showdown_ranges=self.showdown_trio_ranges,
+        )
+        trophy_delta = update["trophy_delta"]
+        self.current_trophies = update["new_trophies"]
+        self.win_streak = update["new_win_streak"]
+        if parsed_result.result == MatchResult.DRAW and parsed_result.place is None and trophy_delta == 0:
+            print("Nothing changed. Draw detected")
 
         print(f"Trophies: {old_trophies} -> {self.current_trophies}")
         print(f"Win Streak: {old_win_streak} -> {self.win_streak}")
