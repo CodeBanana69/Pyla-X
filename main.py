@@ -145,9 +145,24 @@ def apply_play_order(queue_data):
     return ordered_data
 
 
-def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
+def _adb_port_for_bound_profile():
+    try:
+        from instance_profiles import current_bound_profile, get_registry
+        profile_id = current_bound_profile()
+        if not profile_id:
+            return None
+        return get_registry().effective_adb_port(profile_id)
+    except Exception:
+        return None
+
+
+def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None, profile_id=None):
     class Main:
         def __init__(self):
+            if profile_id:
+                from instance_profiles import bind_profile
+                bind_profile(profile_id)
+            adb_port = _adb_port_for_bound_profile()
             current_playstyle = load_toml_as_dict("cfg/bot_config.toml").get("current_playstyle", "default_up.pyla")
             try:
                 self.max_fps = int(load_toml_as_dict("cfg/general_config.toml")['max_fps'])
@@ -155,9 +170,9 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                 self.max_fps = None
 
             if self.max_fps:
-                self.window_controller = WindowController(self.max_fps)
+                self.window_controller = WindowController(self.max_fps, adb_port=adb_port)
             else:
-                self.window_controller = WindowController()
+                self.window_controller = WindowController(adb_port=adb_port)
             data = clean_queue(queue_data)
             data = apply_play_order(data)
             if not data:

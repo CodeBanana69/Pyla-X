@@ -10,7 +10,16 @@ from typing import Any, Callable
 
 
 GLOBAL_LOGS = collections.deque(maxlen=2000)
+INSTANCE_LOGS: dict[str, collections.deque] = {}
 GLOBAL_LOGS_LOCK = threading.Lock()
+
+
+def logs_for_thread(thread_name: str) -> collections.deque:
+    bucket = INSTANCE_LOGS.get(thread_name)
+    if bucket is None:
+        bucket = collections.deque(maxlen=2000)
+        INSTANCE_LOGS[thread_name] = bucket
+    return bucket
 
 
 class ThreadFilterStream:
@@ -43,6 +52,7 @@ class ThreadFilterStream:
                 log_line = self.ANSI_CLEAN_RE.sub("", line)
                 if self.is_stderr:
                     log_line = f"[stderr] {log_line}"
+                logs_for_thread(thread_name).append(log_line)
                 GLOBAL_LOGS.append(log_line)
 
     def flush(self):
@@ -93,18 +103,37 @@ class RuntimeControl:
 class RuntimeManager:
     def __init__(self, pyla_main):
         self.pyla_main = pyla_main
-        self._thread: threading.Thread | None = None
-        self.rt_control: RuntimeControl | None = None
         self._lock = threading.Lock()
-        self._state = "idle"
-        self._last_error = ""
-        self._session_started_at: float | None = None
+        self._slots: dict[str, dict[str, Any]] = {}
+        self._active_profile_provider: Callable[[], str] = lambda: "default"
         self.queue_provider: Callable[[], list[dict[str, Any]]] | None = None
         self._auth_provider: Callable[[], dict[str, Any]] | None = None
 
-    def _set_state(self, state: str):
+    def set_active_profile_provider(self, provider: Callable[[], str]) -> None:
+        self._active_profile_provider = provider
+
+    def _active_profile_id(self) -> str:
+        try:
+            return str(self._active_profile_provider() or "default")
+        except Exception:
+            return "default"
+
+    def _slot(self, profile_id: str) -> dict[str, Any]:
+        slot = self._slots.get(profile_id)
+        if slot is None:
+            slot = {
+                "thread": None,
+                "rt_control": None,
+                "state": "idle",
+                "last_error": "",
+                "session_started_at": None,
+            }
+            self._slots[profile_id] = slot
+        return slot
+
+    def _set_slot_state(self, profile_id: str, state: str):
         with self._lock:
-            self._state = state
+            self._slot(profile_id)["state"] = state
 
     def configure_start_gate(
             self,
@@ -114,47 +143,54 @@ class RuntimeManager:
         self.queue_provider = queue_provider
         self._auth_provider = auth_provider
 
-    def get_status(self) -> dict[str, Any]:
+    def get_status(self, profile_id: str | None = None) -> dict[str, Any]:
+        profile_id = profile_id or self._active_profile_id()
         with self._lock:
-            thread_alive = self._thread.is_alive() if self._thread else False
-            if not thread_alive and self._state != "error":
-                self._state = "idle"
-                self._thread = None
-                self.rt_control = None
-                self._session_started_at = None
+            slot = self._slot(profile_id)
+            thread = slot["thread"]
+            thread_alive = thread.is_alive() if thread else False
+            if not thread_alive and slot["state"] != "error":
+                slot["state"] = "idle"
+                slot["thread"] = None
+                slot["rt_control"] = None
+                slot["session_started_at"] = None
             return {
-                "state": self._state,
+                "profile_id": profile_id,
+                "state": slot["state"],
                 "is_running": thread_alive,
-                "last_error": self._last_error,
-                "session_started_at": self._session_started_at if thread_alive else None,
+                "last_error": slot["last_error"],
+                "session_started_at": slot["session_started_at"] if thread_alive else None,
             }
 
-    def start(self, queue_data: list[dict[str, Any]], discord_bot) -> dict[str, Any]:
+    def start(self, queue_data: list[dict[str, Any]], discord_bot, profile_id: str | None = None) -> dict[str, Any]:
+        profile_id = profile_id or self._active_profile_id()
         with self._lock:
-            thread_alive = self._thread.is_alive() if self._thread else False
+            slot = self._slot(profile_id)
+            thread_alive = slot["thread"].is_alive() if slot["thread"] else False
 
             if thread_alive:
-                if self._state == "paused" and self.rt_control:
-                    self.rt_control.resume()
-                    self._state = "running"
-                    self._last_error = ""
-                    return {"ok": True, "message": "Pyla resumed."}
-                return {"ok": False, "message": f"Pyla cannot start while state is {self._state}."}
+                if slot["state"] == "paused" and slot["rt_control"]:
+                    slot["rt_control"].resume()
+                    slot["state"] = "running"
+                    slot["last_error"] = ""
+                    return {"ok": True, "message": "Pyla resumed.", "profile_id": profile_id}
+                return {"ok": False, "message": f"Pyla cannot start while state is {slot['state']}.", "profile_id": profile_id}
 
-            self.rt_control = RuntimeControl(self._set_state)
-            self._state = "running"
-            self._last_error = ""
-            self._session_started_at = time.time()
-            self._thread = threading.Thread(
+            control = RuntimeControl(lambda state: self._set_slot_state(profile_id, state))
+            slot["rt_control"] = control
+            slot["state"] = "running"
+            slot["last_error"] = ""
+            slot["session_started_at"] = time.time()
+            slot["thread"] = threading.Thread(
                 target=self._run_worker,
-                args=(queue_data, self.rt_control, discord_bot),
+                args=(queue_data, control, discord_bot, profile_id),
                 daemon=True,
-                name="pyla-runtime",
+                name=f"pyla-{profile_id}",
             )
-            self._thread.start()
-            return {"ok": True, "message": "Pyla started."}
+            slot["thread"].start()
+            return {"ok": True, "message": "Pyla started.", "profile_id": profile_id}
 
-    def start_current_queue(self, discord_bot) -> dict[str, Any]:
+    def start_current_queue(self, discord_bot, profile_id: str | None = None) -> dict[str, Any]:
         if not self.queue_provider or not self._auth_provider:
             return {
                 "ok": False,
@@ -162,7 +198,8 @@ class RuntimeManager:
                 "code": "START_GATE_NOT_CONFIGURED",
             }
 
-        runtime_state = self.get_status()["state"]
+        profile_id = profile_id or self._active_profile_id()
+        runtime_state = self.get_status(profile_id)["state"]
         queue_data = self.queue_provider()
         if runtime_state != "paused" and not queue_data:
             return {"ok": False, "message": "Queue is empty.", "code": "EMPTY_QUEUE"}
@@ -176,85 +213,106 @@ class RuntimeManager:
                 "auth": auth_state,
             }
 
-        return self.start(queue_data, discord_bot)
+        return self.start(queue_data, discord_bot, profile_id=profile_id)
 
-    def _run_worker(self, queue_data: list[dict[str, Any]], control: RuntimeControl, discord_bot):
+    def _run_worker(self, queue_data: list[dict[str, Any]], control: RuntimeControl, discord_bot, profile_id: str):
+        from instance_profiles import bind_profile, clear_bound_profile
+        bind_profile(profile_id)
+        print(f"Starting profile {profile_id}.")
         try:
-            self.pyla_main(discord_bot, queue_data, runtime_control=control)
+            self.pyla_main(discord_bot, queue_data, runtime_control=control, profile_id=profile_id)
             with self._lock:
-                if self._state != "error":
-                    self._state = "idle"
+                slot = self._slot(profile_id)
+                if slot["state"] != "error":
+                    slot["state"] = "idle"
         except SystemExit as exc:
             code = exc.code if isinstance(exc.code, int) else 0
             with self._lock:
+                slot = self._slot(profile_id)
                 if code in (0, None):
-                    self._state = "idle"
-                    self._last_error = ""
+                    slot["state"] = "idle"
+                    slot["last_error"] = ""
                 else:
-                    self._state = "error"
-                    self._last_error = f"Pyla exited with code {code}."
+                    slot["state"] = "error"
+                    slot["last_error"] = f"Pyla exited with code {code}."
         except Exception as exc:
             with self._lock:
-                self._state = "error"
-                self._last_error = str(exc)
+                slot = self._slot(profile_id)
+                slot["state"] = "error"
+                slot["last_error"] = str(exc)
             print(str(exc))
             traceback.print_exc()
         finally:
+            clear_bound_profile()
             with self._lock:
-                self._thread = None
-                self.rt_control = None
-                self._session_started_at = None
+                slot = self._slot(profile_id)
+                if slot.get("thread") is threading.current_thread():
+                    slot["thread"] = None
+                    slot["rt_control"] = None
+                    slot["session_started_at"] = None
 
-    def pause(self) -> dict[str, Any]:
+    def pause(self, profile_id: str | None = None) -> dict[str, Any]:
+        profile_id = profile_id or self._active_profile_id()
         with self._lock:
-            thread_alive = self._thread.is_alive() if self._thread else False
-            if not thread_alive or not self.rt_control:
-                return {"ok": False, "message": "Pyla is not running."}
+            slot = self._slot(profile_id)
+            thread_alive = slot["thread"].is_alive() if slot["thread"] else False
+            if not thread_alive or not slot["rt_control"]:
+                return {"ok": False, "message": "Pyla is not running.", "profile_id": profile_id}
 
-            if self._state == "running":
-                self.rt_control.request_pause()
-                self._state = "pausing"
-                return {"ok": True, "message": "Pause requested. Pyla will pause in the lobby."}
+            if slot["state"] == "running":
+                slot["rt_control"].request_pause()
+                slot["state"] = "pausing"
+                return {"ok": True, "message": "Pause requested. Pyla will pause in the lobby.", "profile_id": profile_id}
 
-            if self._state in {"pausing", "paused"}:
-                return {"ok": True, "message": "Pause already requested."}
+            if slot["state"] in {"pausing", "paused"}:
+                return {"ok": True, "message": "Pause already requested.", "profile_id": profile_id}
 
-            return {"ok": False, "message": f"Pyla cannot pause while state is {self._state}."}
+            return {"ok": False, "message": f"Pyla cannot pause while state is {slot['state']}.", "profile_id": profile_id}
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, profile_id: str | None = None) -> dict[str, Any]:
+        profile_id = profile_id or self._active_profile_id()
         with self._lock:
-            thread_alive = self._thread.is_alive() if self._thread else False
-            if not thread_alive or not self.rt_control:
-                self._state = "idle"
-                self._session_started_at = None
-                return {"ok": True, "message": "Pyla is already stopped."}
+            slot = self._slot(profile_id)
+            thread_alive = slot["thread"].is_alive() if slot["thread"] else False
+            if not thread_alive or not slot["rt_control"]:
+                slot["state"] = "idle"
+                slot["session_started_at"] = None
+                return {"ok": True, "message": "Pyla is already stopped.", "profile_id": profile_id}
 
-            thread = self._thread
-            was_paused = self._state == "paused"
-            self.rt_control.request_stop()
-            self._state = "stopping"
+            thread = slot["thread"]
+            was_paused = slot["state"] == "paused"
+            slot["rt_control"].request_stop()
+            slot["state"] = "stopping"
 
         if was_paused and thread:
             thread.join(timeout=2)
             if not thread.is_alive():
                 with self._lock:
-                    stopped_state = self._state
-                    self._thread = None
-                    self.rt_control = None
-                    self._session_started_at = None
-                    if self._state != "error":
-                        self._state = "idle"
+                    slot = self._slot(profile_id)
+                    stopped_state = slot["state"]
+                    if slot.get("thread") is thread:
+                        slot["thread"] = None
+                        slot["rt_control"] = None
+                        slot["session_started_at"] = None
+                    if slot["state"] != "error":
+                        slot["state"] = "idle"
                         stopped_state = "idle"
                 if stopped_state == "error":
-                    return {"ok": False, "message": self._last_error or "Pyla stopped with an error."}
-                return {"ok": True, "message": "Pyla stopped."}
+                    return {"ok": False, "message": slot["last_error"] or "Pyla stopped with an error.", "profile_id": profile_id}
+                return {"ok": True, "message": "Pyla stopped.", "profile_id": profile_id}
 
-        return {"ok": True, "message": "Stop requested. Pyla is shutting down."}
+        return {"ok": True, "message": "Stop requested. Pyla is shutting down.", "profile_id": profile_id}
 
-    def get_logs(self) -> list[str]:
+    def get_logs(self, profile_id: str | None = None) -> list[str]:
+        profile_id = profile_id or self._active_profile_id()
+        thread_name = f"pyla-{profile_id}"
         with GLOBAL_LOGS_LOCK:
-            return list(GLOBAL_LOGS)
+            return list(INSTANCE_LOGS.get(thread_name, ()))
 
-    def clear_logs(self):
+    def clear_logs(self, profile_id: str | None = None):
+        profile_id = profile_id or self._active_profile_id()
+        thread_name = f"pyla-{profile_id}"
         with GLOBAL_LOGS_LOCK:
-            GLOBAL_LOGS.clear()
+            bucket = INSTANCE_LOGS.get(thread_name)
+            if bucket is not None:
+                bucket.clear()

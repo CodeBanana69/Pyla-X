@@ -11,6 +11,8 @@ from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
 from discord_bot import DiscordBot
+from instance_profiles import get_registry
+from port_finder import scan_emulator_ports
 from utils import get_brawler_icon_path, resolve_project_path, resolve_within
 from .runtime import RuntimeManager
 from .services import WebDataService
@@ -95,6 +97,7 @@ def create_app(pyla_main, start_discord_bot=False):
     app.config["UI_API_TOKEN"] = secrets.token_urlsafe(32)
 
     runtime_manager = RuntimeManager(pyla_main)
+    runtime_manager.set_active_profile_provider(lambda: get_registry().active_id())
     data_service = WebDataService(runtime_manager)
     discord_bot = DiscordBot(runtime_manager, data_service)
     runtime_manager.configure_start_gate(data_service.get_queue_data, data_service.get_auth_state)
@@ -263,6 +266,55 @@ def create_app(pyla_main, start_discord_bot=False):
     def reset_settings(section: str):
         return jsonify(data_service.reset_settings(section))
 
+    @app.put("/api/profiles/sync")
+    def update_profile_sync():
+        payload = request.get_json(silent=True) or {}
+        section = str(payload.get("section") or "")
+        key = str(payload.get("key") or "")
+        return jsonify(data_service.set_setting_sync(section, key, bool(payload.get("synced"))))
+
+    @app.get("/api/profiles")
+    def list_profiles():
+        return jsonify(data_service.get_profiles_payload())
+
+    @app.post("/api/profiles")
+    def create_profile():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(data_service.create_profile(str(payload.get("name") or "")))
+
+    @app.put("/api/profiles/active")
+    def activate_profile():
+        payload = request.get_json(silent=True) or {}
+        return jsonify(data_service.use_profile(str(payload.get("id") or payload.get("profile_id") or "")))
+
+    @app.put("/api/profiles/<profile_id>")
+    def update_profile(profile_id: str):
+        payload = request.get_json(silent=True) or {}
+        return jsonify(data_service.update_profile(profile_id, payload))
+
+    @app.delete("/api/profiles/<profile_id>")
+    def delete_profile(profile_id: str):
+        return jsonify(data_service.delete_profile(profile_id))
+
+    @app.post("/api/adb/scan")
+    def scan_adb_ports():
+        payload = request.get_json(silent=True) or {}
+        deep = bool(payload.get("deep"))
+        try:
+            devices = scan_emulator_ports(deep=deep)
+        except Exception as exc:
+            return jsonify({"ok": False, "message": str(exc), "deep": deep, "devices": []}), 500
+        assigned = {
+            profile["adb_port"]: profile["name"]
+            for profile in data_service.get_profiles_payload()["items"]
+            if profile.get("adb_port")
+        }
+        for device in devices:
+            used_by = assigned.get(device["port"])
+            if used_by:
+                device["used_by"] = used_by
+        return jsonify({"ok": True, "deep": deep, "devices": devices})
+
     @app.post("/api/runtime/start")
     def runtime_start():
         result = runtime_manager.start_current_queue(discord_bot)
@@ -278,7 +330,11 @@ def create_app(pyla_main, start_discord_bot=False):
 
     @app.get("/api/runtime/status")
     def runtime_status():
-        return jsonify({"ok": True, "runtime": runtime_manager.get_status()})
+        return jsonify({
+            "ok": True,
+            "runtime": runtime_manager.get_status(),
+            "profiles": data_service.get_profiles_payload(),
+        })
 
     @app.post("/api/runtime/pause")
     def runtime_pause():
@@ -294,11 +350,17 @@ def create_app(pyla_main, start_discord_bot=False):
 
     @app.get("/api/runtime/logs")
     def runtime_logs():
-        return jsonify({"ok": True, "logs": runtime_manager.get_logs()})
+        profile_id = str(request.args.get("profile_id") or "").strip() or None
+        return jsonify({
+            "ok": True,
+            "profile_id": profile_id or get_registry().active_id(),
+            "logs": runtime_manager.get_logs(profile_id),
+        })
 
     @app.delete("/api/runtime/logs")
     def clear_runtime_logs():
-        runtime_manager.clear_logs()
+        profile_id = str(request.args.get("profile_id") or "").strip() or None
+        runtime_manager.clear_logs(profile_id)
         return jsonify({"ok": True, "items": []})
 
     @app.get("/api/history")

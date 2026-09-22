@@ -105,9 +105,20 @@ const state = {
     forceScrollLogs: false,
     adbDevices: null,
     scanningAdb: false,
+    logsProfileId: "",
+    logsProfilePinned: false,
+    logsRenderedProfile: "",
 };
 
-function renderSyncButton() { return ""; }
+function renderSyncButton(section, key) {
+    const syncMap = state.bootstrap?.settings?.[section]?._sync;
+    if (!syncMap || !Object.prototype.hasOwnProperty.call(syncMap, key)) return "";
+    const synced = Boolean(syncMap[key]);
+    const icon = synced
+        ? `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`
+        : `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M17 7l-1.5-1.5a4 4 0 0 0-5.7 0L8 7"/><path d="M7 17l1.5 1.5a4 4 0 0 0 5.7 0L16 17"/><path d="M8 12h8"/></svg>`;
+    return `<button type="button" class="btn-sync-toggle ${synced ? "synced" : "unsynced"}" data-sync-section="${section}" data-sync-key="${key}" data-synced="${synced ? "1" : "0"}" data-tooltip="Whether that setting should be the same accross all instances or if it's instance-specific" aria-label="Toggle instance sync status">${icon}</button>`;
+}
 
 const SETTINGS_META = {
     general: [
@@ -502,8 +513,6 @@ function renderDashboard() {
             </div>`;
     }
 
-    const runtimeState = escapeHtml(String(runtime.state || "idle").replace(/[^a-z-]/gi, ""));
-    const emulatorPort = Number(state.bootstrap.settings?.general?.emulator_port || 5037);
     view.innerHTML = `
         <div class="dash-grid">
             <div class="hero-row">
@@ -525,36 +534,294 @@ function renderDashboard() {
                 </section>
             </div>
 
-            <section class="panel profile-switcher-card premium-profile-preview">
-                <div class="profile-switcher-heading">
-                    <div class="profile-heading-copy">
-                        <p class="eyebrow">Profiles</p>
-                        <div class="profile-title-row"><h3 class="panel-title">One setup today, more with Premium</h3><span class="premium-badge-inline">Premium</span></div>
-                    </div>
-                    <a class="btn btn-sm profile-add-btn premium-cta" href="https://pyla-ai.angelfirela.dev/premium" target="_blank" rel="noreferrer">Explore Premium</a>
-                </div>
-                <div class="profile-list premium-profile-list">
-                    <div class="profile-entry is-active">
-                        <div class="profile-entry-main">
-                            <span class="profile-entry-name">Public profile</span>
-                            <span class="profile-entry-details"><span class="profile-runtime-status status-${runtimeState}"><span class="profile-status-dot"></span>${escapeHtml(runtimeLabel(runtime))}</span><span class="profile-port-summary">ADB ${emulatorPort}</span></span>
-                        </div>
-                        <span class="profile-active-label">Active</span>
-                    </div>
-                    <button class="profile-entry premium-profile-locked premium-locked-action" type="button">
-                        <div class="profile-entry-main"><span class="profile-entry-name">Second emulator profile</span><span class="profile-entry-details">Separate queue, settings, history and runtime</span></div><span class="premium-profile-lock">Premium</span>
-                    </button>
-                    <button class="profile-entry premium-profile-locked premium-locked-action" type="button">
-                        <div class="profile-entry-main"><span class="profile-entry-name">Additional profile</span><span class="profile-entry-details">Run independent account configurations</span></div><span class="premium-profile-lock">Premium</span>
-                    </button>
-                </div>
-            </section>
+            ${renderProfileSwitcher(runtimeState)}
         </div>`;
 
     document.getElementById("browsePlaystylesBtn")?.addEventListener("click", () => setView("playstyles"));
     document.getElementById("goToBrawlersBtn")?.addEventListener("click", () => setView("queue"));
     bindRuntimeButtons();
+    bindProfileEvents();
     updateSessionTimer();
+}
+
+function renderProfileSwitcher(runtimeState) {
+    const profiles = state.bootstrap.profiles?.items || [];
+    const active = profiles.find((profile) => profile.is_active) || profiles[0];
+    const activePort = active?.adb_port ?? state.bootstrap.settings?.general?.emulator_port ?? "";
+    const entries = profiles.map((profile) => {
+        const profileRuntime = profile.runtime || { state: "idle" };
+        const status = escapeHtml(String(profileRuntime.state || "idle").replace(/[^a-z-]/gi, ""));
+        const portLabel = profile.adb_port ? `ADB ${profile.adb_port}` : "No ADB port";
+        return `
+            <div class="profile-entry ${profile.is_active ? "is-active" : ""}" data-profile-id="${escapeHtml(profile.id)}" role="button" tabindex="0" aria-label="${profile.is_active ? "Active" : "Use profile"}">
+                <div class="profile-entry-main">
+                    <span class="profile-entry-name">${escapeHtml(profile.name)}</span>
+                    <span class="profile-entry-details">
+                        <span class="profile-runtime-status status-${status}"><span class="profile-status-dot"></span>${escapeHtml(runtimeLabel(profileRuntime))}</span>
+                        <span class="profile-port-summary">${escapeHtml(portLabel)}</span>
+                    </span>
+                </div>
+                <span class="${profile.is_active ? "profile-active-label" : "profile-use-label"}">${profile.is_active ? "Active" : "Use profile"}</span>
+                <div class="profile-entry-actions">
+                    <button class="icon-btn" type="button" data-rename-profile="${escapeHtml(profile.id)}" data-profile-name="${escapeHtml(profile.name)}" data-tooltip="Rename ${escapeHtml(profile.name)}" aria-label="Rename ${escapeHtml(profile.name)}">✎</button>
+                    <button class="icon-btn danger-icon-btn" type="button" data-delete-profile="${escapeHtml(profile.id)}" data-profile-name="${escapeHtml(profile.name)}" data-tooltip="Delete ${escapeHtml(profile.name)}" aria-label="Delete ${escapeHtml(profile.name)}" ${profile.is_default ? "disabled" : ""}>${iconMarkup("trash")}</button>
+                </div>
+            </div>`;
+    }).join("");
+
+    return `
+        <section class="panel profile-switcher-card">
+            <div class="profile-switcher-heading">
+                <div class="profile-heading-copy">
+                    <p class="eyebrow">Profiles</p>
+                    <div class="profile-title-row">
+                        <h3 class="panel-title">Manage Profiles</h3>
+                        <button class="icon-btn profile-help" type="button" data-tooltip="Separate queue, settings, history and runtime" aria-label="Click to open the short profiles tutorial">?</button>
+                    </div>
+                </div>
+                <div class="profile-heading-actions">
+                    <div class="profile-control-group profile-port-control">
+                        <span class="profile-control-label">Active ADB port</span>
+                        <div class="profile-control-actions">
+                            <input id="activeProfilePort" type="number" min="1" max="65535" value="${escapeHtml(activePort)}" aria-label="Active ADB port">
+                            <button id="findAdbPortBtn" class="btn btn-sm" type="button">Find Port</button>
+                        </div>
+                    </div>
+                    <button id="addProfileBtn" class="btn btn-sm profile-add-btn" type="button">Add profile</button>
+                </div>
+            </div>
+            <div id="profileList" class="profile-list" aria-label="Available profiles">${entries}</div>
+        </section>`;
+}
+
+function bindProfileEvents() {
+    document.getElementById("addProfileBtn")?.addEventListener("click", createProfile);
+    document.getElementById("findAdbPortBtn")?.addEventListener("click", openPortFinder);
+    document.getElementById("activeProfilePort")?.addEventListener("change", saveActiveProfilePort);
+    document.getElementById("profileList")?.addEventListener("click", onProfileListClick);
+    document.getElementById("profileList")?.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const entry = event.target.closest("[data-profile-id]");
+        if (!entry || event.target.closest("button")) return;
+        event.preventDefault();
+        switchProfile(entry.dataset.profileId);
+    });
+}
+
+function onProfileListClick(event) {
+    const renameButton = event.target.closest("[data-rename-profile]");
+    if (renameButton) {
+        event.stopPropagation();
+        renameProfile(renameButton.dataset.renameProfile, renameButton.dataset.profileName);
+        return;
+    }
+    const deleteButton = event.target.closest("[data-delete-profile]");
+    if (deleteButton) {
+        event.stopPropagation();
+        deleteProfile(deleteButton.dataset.deleteProfile, deleteButton.dataset.profileName);
+        return;
+    }
+    const entry = event.target.closest("[data-profile-id]");
+    if (!entry || event.target.closest("button")) return;
+    switchProfile(entry.dataset.profileId);
+}
+
+async function createProfile() {
+    const name = window.prompt("Enter a name for the new profile:");
+    if (!name) return;
+    try {
+        const payload = await fetchJSON("/api/profiles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+        });
+        applyProfileContext(payload);
+        const created = payload.profiles?.items?.find((profile) => profile.is_active);
+        showToast(`Profile "${created?.name || name}" created successfully!`);
+    } catch (error) {
+        showToast(error.message || "Failed to create profile.", "error");
+    }
+}
+
+async function switchProfile(profileId) {
+    const activeId = state.bootstrap.profiles?.active_profile_id;
+    if (!profileId || profileId === activeId) return;
+    document.body.classList.add("instance-switching");
+    try {
+        const payload = await fetchJSON("/api/profiles/active", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: profileId }),
+        });
+        applyProfileContext(payload);
+        showToast("Active profile switched successfully!");
+    } catch (error) {
+        showToast(error.message || "Failed to switch active profile.", "error");
+    } finally {
+        document.body.classList.remove("instance-switching");
+    }
+}
+
+async function renameProfile(profileId, currentName) {
+    const name = window.prompt(`Enter a new name for "${currentName}":`, currentName);
+    if (!name || name === currentName) return;
+    try {
+        const profiles = await fetchJSON(`/api/profiles/${encodeURIComponent(profileId)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+        });
+        applyProfileContext(profiles);
+        showToast(`Profile renamed to "${name}".`);
+    } catch (error) {
+        showToast(error.message || "Failed to rename profile.", "error");
+    }
+}
+
+async function deleteProfile(profileId, name) {
+    if (!window.confirm(`Are you sure you want to delete the profile "${name}"? All of its profile-specific settings and match history will be permanently deleted.`)) return;
+    try {
+        const payload = await fetchJSON(`/api/profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
+        applyProfileContext(payload);
+        showToast(`Profile "${name}" deleted.`);
+    } catch (error) {
+        showToast(error.message || "Failed to delete profile.", "error");
+    }
+}
+
+async function saveActiveProfilePort() {
+    const input = document.getElementById("activeProfilePort");
+    const active = (state.bootstrap.profiles?.items || []).find((profile) => profile.is_active);
+    if (!input || !active) return;
+    const port = Number(input.value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        showToast("Failed to update emulator port: ADB port must be between 1 and 65535.", "error");
+        return;
+    }
+    try {
+        const payload = await fetchJSON(`/api/profiles/${encodeURIComponent(active.id)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ adb_port: port }),
+        });
+        applyProfileContext(payload);
+        showToast("Emulator port updated successfully!");
+    } catch (error) {
+        showToast(`Failed to update emulator port: ${error.message}`, "error");
+    }
+}
+
+function applyProfileContext(payload) {
+    if (!payload?.profiles) return;
+    state.bootstrap.profiles = payload.profiles;
+    if (payload.runtime) state.bootstrap.runtime = payload.runtime;
+    if (payload.queue) state.bootstrap.queue = payload.queue;
+    if (payload.playstyles) state.bootstrap.playstyles = payload.playstyles;
+    if (payload.settings) state.bootstrap.settings = payload.settings;
+    if (payload.history) state.bootstrap.history = payload.history;
+    state.logsProfilePinned = false;
+    state.logsRenderedProfile = "";
+    if (typeof syncQueueFormState === "function") syncQueueFormState();
+    renderAll();
+}
+
+function openPortFinder() {
+    let modal = document.getElementById("adbPortModal");
+    if (!modal) {
+        modal = document.createElement("div");
+        modal.id = "adbPortModal";
+        modal.className = "modal-overlay hidden";
+        modal.innerHTML = `
+            <section class="modal" role="dialog" aria-modal="true" aria-labelledby="adbPortTitle">
+                <div class="modal-header">
+                    <p class="eyebrow">Find Port</p>
+                    <h3 id="adbPortTitle">Find ADB Emulator Port</h3>
+                    <p>Select from detected emulator connections running on your machine.</p>
+                </div>
+                <div class="premium-modal-actions">
+                    <button id="scanAdbBtn" class="btn btn-primary" type="button">Scan ADB Devices</button>
+                    <button id="deepScanAdbBtn" class="btn" type="button">Run Deep Scan</button>
+                    <button id="closeAdbPortBtn" class="btn" type="button">Cancel</button>
+                </div>
+                <p id="adbScanStatus" class="meta"></p>
+                <div id="adbDeviceList" class="profile-list"></div>
+                <p class="help-text">Still not found? Try a deep scan of all ports from 1000 to 99999 (this may take a few seconds).</p>
+            </section>`;
+        document.body.appendChild(modal);
+        document.getElementById("closeAdbPortBtn")?.addEventListener("click", () => modal.classList.add("hidden"));
+        document.getElementById("scanAdbBtn")?.addEventListener("click", () => scanAdbDevices(false));
+        document.getElementById("deepScanAdbBtn")?.addEventListener("click", () => scanAdbDevices(true));
+        modal.addEventListener("click", (event) => {
+            if (event.target === modal) modal.classList.add("hidden");
+        });
+    }
+    modal.classList.remove("hidden");
+    scanAdbDevices(false);
+}
+
+async function scanAdbDevices(deep) {
+    const status = document.getElementById("adbScanStatus");
+    const list = document.getElementById("adbDeviceList");
+    if (status) status.textContent = deep ? "Performing deep scan (this can be slower)..." : "Scanning running emulators...";
+    if (list) list.innerHTML = "";
+    state.scanningAdb = true;
+    try {
+        const result = await fetchJSON("/api/adb/scan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deep: Boolean(deep) }),
+        });
+        state.adbDevices = result.devices || [];
+        renderAdbDevices(state.adbDevices);
+        if (!state.adbDevices.length && status) {
+            status.textContent = "No online ADB devices found. Make sure USB Debugging is enabled in your emulator settings.";
+        } else if (status) {
+            status.textContent = "";
+        }
+    } catch (error) {
+        if (status) status.textContent = "";
+        showToast(`Failed to scan: ${error.message || "Failed to fetch ADB devices."}`, "error");
+    } finally {
+        state.scanningAdb = false;
+    }
+}
+
+function renderAdbDevices(devices) {
+    const list = document.getElementById("adbDeviceList");
+    if (!list) return;
+    if (!devices.length) {
+        list.innerHTML = `<div class="empty-state">If it still doesn't work, try restarting your emulator and/or PC or try running a deep scan of all ports.</div>`;
+        return;
+    }
+    list.innerHTML = devices.map((device) => `
+        <button class="profile-entry adb-device-click-item" type="button" data-adb-port="${device.port}">
+            <div class="profile-entry-main">
+                <span class="profile-entry-name">${escapeHtml(device.serial || device.host)}</span>
+                <span class="profile-entry-details">Port: ${escapeHtml(device.port)}${device.used_by ? ` · Used by: ${escapeHtml(device.used_by)}` : ""}</span>
+            </div>
+            <span class="profile-use-label">Use profile</span>
+        </button>
+    `).join("");
+    list.querySelectorAll("[data-adb-port]").forEach((button) => {
+        button.addEventListener("click", () => assignScannedPort(Number(button.dataset.adbPort)));
+    });
+}
+
+async function assignScannedPort(port) {
+    const active = (state.bootstrap.profiles?.items || []).find((profile) => profile.is_active);
+    if (!active) return;
+    try {
+        const payload = await fetchJSON(`/api/profiles/${encodeURIComponent(active.id)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ adb_port: port }),
+        });
+        applyProfileContext(payload);
+        document.getElementById("adbPortModal")?.classList.add("hidden");
+        showToast("Emulator port updated successfully!");
+    } catch (error) {
+        showToast(`Failed to update emulator port: ${error.message}`, "error");
+    }
 }
 
 function renderDashboardStats(runtime) {
@@ -2042,6 +2309,14 @@ async function refreshRuntimeState() {
         if (!result.ok || !result.runtime) return;
         const previousState = state.bootstrap.runtime?.state;
         state.bootstrap.runtime = result.runtime;
+        if (result.profiles?.items) {
+            const signature = (items) => JSON.stringify((items || []).map((profile) => [profile.id, profile.name, profile.adb_port, profile.is_active, profile.runtime?.state]));
+            const changed = signature(state.bootstrap.profiles?.items) !== signature(result.profiles.items);
+            state.bootstrap.profiles = result.profiles;
+            const portFocused = document.activeElement?.id === "activeProfilePort";
+            if (changed && !portFocused && state.currentView === "dashboard") renderDashboard();
+            if (changed && state.currentView === "logs") renderLogProfileTabs(selectedLogsProfileId());
+        }
         updateSessionTimer();
         // Keep this as a second refresh trigger while Pyla is running. The
         // dedicated History poller can be throttled by an embedded WebView, and
@@ -2713,6 +2988,14 @@ function bindPlaystyleCardEvents() {
 
 
 function bindSettingsEvents() {
+    document.querySelectorAll("[data-sync-section]").forEach((button) => {
+        button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleSettingSync(button);
+        });
+    });
+
     const settingsSearch = document.getElementById("settingsSearch");
     if (settingsSearch) {
         settingsSearch.addEventListener("input", () => {
@@ -3293,18 +3576,46 @@ function showPremiumModal() {
     modal.classList.remove("hidden");
 }
 
+function selectedLogsProfileId() {
+    if (state.logsProfilePinned && state.logsProfileId) return state.logsProfileId;
+    return state.bootstrap?.profiles?.active_profile_id || "default";
+}
+
 async function refreshLogs() {
     try {
-        const data = await fetchJSON("/api/runtime/logs", {}, true);
+        const profileId = selectedLogsProfileId();
+        const data = await fetchJSON(`/api/runtime/logs?profile_id=${encodeURIComponent(profileId)}`, {}, true);
         if (data && data.logs) {
-            renderLogsContent(data.logs);
+            renderLogsContent(data.logs, data.profile_id || profileId);
         }
     } catch (e) {
         console.error("Failed to fetch logs:", e);
     }
 }
 
-function renderLogsContent(logs) {
+async function toggleSettingSync(button) {
+    const section = button.dataset.syncSection;
+    const key = button.dataset.syncKey;
+    const synced = button.dataset.synced !== "1";
+    try {
+        const result = await fetchJSON("/api/profiles/sync", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ section, key, synced }),
+        });
+        if (!result || result.ok === false) {
+            showToast(result?.message || "Failed to update sync status.", "error");
+            return;
+        }
+        state.bootstrap.settings[section] = result;
+        renderSettings();
+        showToast(synced ? "Setting synced across instances." : "Setting unsynced (instance-specific).");
+    } catch (error) {
+        showToast(error.message || "Failed to update sync status.", "error");
+    }
+}
+
+function renderLogsContent(logs, profileId) {
     const view = document.getElementById("view-logs");
     if (!view) return;
 
@@ -3312,6 +3623,7 @@ function renderLogsContent(logs) {
         view.innerHTML = `
             <div class="logs-layout">
                 <section class="panel">
+                    <div id="logProfileTabs" class="log-profile-tabs" aria-label="Available profiles"></div>
                     <div class="panel-header logs-head">
                         <div class="panel-actions logs-actions">
                             <button id="btnCopyLogs" class="btn">Copy All</button>
@@ -3330,6 +3642,13 @@ function renderLogsContent(logs) {
         document.getElementById("btnSaveLogs").addEventListener("click", saveLogsToTxt);
         document.getElementById("btnClearLogs").addEventListener("click", clearLogs);
         document.getElementById("btnScrollToggle").addEventListener("click", toggleAutoScroll);
+    }
+
+    renderLogProfileTabs(profileId);
+    if (state.logsRenderedProfile !== profileId) {
+        state.logsRenderedProfile = profileId;
+        const terminalReset = document.getElementById("logsTerminal");
+        if (terminalReset) terminalReset.replaceChildren();
     }
 
     const terminal = document.getElementById("logsTerminal");
@@ -3444,9 +3763,27 @@ function toggleAutoScroll() {
     }
 }
 
+function renderLogProfileTabs(selectedId) {
+    const host = document.getElementById("logProfileTabs");
+    if (!host) return;
+    const profiles = state.bootstrap.profiles?.items || [];
+    host.innerHTML = profiles.map((profile) => `
+        <button type="button" class="log-profile-tab ${profile.id === selectedId ? "active" : ""}" data-log-profile="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</button>
+    `).join("");
+    host.querySelectorAll("[data-log-profile]").forEach((button) => {
+        button.addEventListener("click", () => {
+            state.logsProfilePinned = true;
+            state.logsProfileId = button.dataset.logProfile;
+            state.logsRenderedProfile = "";
+            refreshLogs();
+        });
+    });
+}
+
 async function clearLogs() {
     try {
-        const result = await fetchJSON("/api/runtime/logs", { method: "DELETE" });
+        const profileId = selectedLogsProfileId();
+        const result = await fetchJSON(`/api/runtime/logs?profile_id=${encodeURIComponent(profileId)}`, { method: "DELETE" });
         if (result.ok) {
             showToast("Logs cleared.", "success");
             state.forceScrollLogs = true;
