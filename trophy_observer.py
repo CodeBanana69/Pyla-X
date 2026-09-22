@@ -29,6 +29,16 @@ class ParsedGameResult:
     raw_string: str = ""
 
 
+def _history_file_for_context():
+    try:
+        from instance_profiles import current_bound_profile, get_registry
+        registry = get_registry()
+        profile_id = current_bound_profile() or registry.active_id()
+        return registry.history_path(profile_id)
+    except Exception:
+        return resolve_project_path("cfg", "match_history.csv")
+
+
 class TrophyObserver:
 
     HISTORY_COLUMNS = [
@@ -62,8 +72,10 @@ class TrophyObserver:
                 time.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 2.0)
 
-    def __init__(self):
-        self.history_file = resolve_project_path("cfg", "match_history.csv")
+    def __init__(self, history_file=None):
+        if history_file is None:
+            history_file = _history_file_for_context()
+        self.history_file = history_file
         
         self.current_trophies = None
         self.current_wins = None

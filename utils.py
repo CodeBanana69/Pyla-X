@@ -58,15 +58,31 @@ cached_toml = {}
 def load_toml_as_dict(file_path, cache=True):
     full_path = PROJECT_ROOT / str(file_path).lstrip('/\\')
     if str(full_path) in cached_toml and cache:
-        return cached_toml[str(full_path)]
+        data = cached_toml[str(full_path)]
+    else:
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                data = toml.load(f)
+                cached_toml[str(full_path)] = data
+        except Exception as e:
+            print(f"Error loading {full_path}: {e}")
+            data = {}
+    return _apply_bound_profile_overrides(file_path, data)
+
+
+def _apply_bound_profile_overrides(file_path, data):
+    """Return per-instance settings when this thread is bound to a profile."""
     try:
-        with open(full_path, 'r', encoding='utf-8') as f:
-            data = toml.load(f)
-            cached_toml[str(full_path)] = data
-            return data
-    except Exception as e:
-        print(f"Error loading {full_path}: {e}")
-        return {}
+        from instance_profiles import current_bound_profile, get_registry
+    except Exception:
+        return data
+    profile_id = current_bound_profile()
+    if not profile_id or not isinstance(data, dict):
+        return data
+    try:
+        return get_registry().apply_file_overrides(profile_id, file_path, data)
+    except Exception:
+        return data
 
 def invalidate_toml_cache(file_path):
     full_path = PROJECT_ROOT / str(file_path).lstrip('/\\')
@@ -119,17 +135,34 @@ def count_mask_pixels(mask, x1, y1, x2, y2):
         return 0
     return cv2.countNonZero(mask[y1:y2, x1:x2])
 
+def _queue_path_for_context():
+    try:
+        from instance_profiles import current_bound_profile, get_registry
+        registry = get_registry()
+        profile_id = current_bound_profile() or registry.active_id()
+        return registry.queue_path(profile_id)
+    except Exception:
+        return resolve_project_path("latest_brawler_data.json")
+
+
 def save_brawler_data(data):
     """
     Save the given data to a json file. As a list of dictionaries.
     """
-    queue_path = resolve_project_path("latest_brawler_data.json")
-    with open(queue_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4)
+    try:
+        from instance_profiles import current_bound_profile, get_registry
+        registry = get_registry()
+        profile_id = current_bound_profile() or registry.active_id()
+        registry.write_queue(profile_id, data)
+        return
+    except Exception:
+        queue_path = resolve_project_path("latest_brawler_data.json")
+        with open(queue_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
 
 
 def load_brawler_data():
-    queue_path = resolve_project_path("latest_brawler_data.json")
+    queue_path = _queue_path_for_context()
     if not queue_path.exists():
         return []
     try:
@@ -147,9 +180,16 @@ def api_update_brawler_data(brawler_data):
 
 
 def clear_brawler_data():
-    queue_path = resolve_project_path("latest_brawler_data.json")
-    if queue_path.exists():
-        queue_path.unlink()
+    try:
+        from instance_profiles import current_bound_profile, get_registry
+        registry = get_registry()
+        profile_id = current_bound_profile() or registry.active_id()
+        registry.write_queue(profile_id, [])
+        return
+    except Exception:
+        queue_path = resolve_project_path("latest_brawler_data.json")
+        if queue_path.exists():
+            queue_path.unlink()
 
 
 def clean_queue(data):

@@ -1095,7 +1095,7 @@ input:focus, select:focus { border-color: var(--brand-main); box-shadow: 0 0 0 3
 }
 
 .profile-switcher-card {
-    display: none;
+    display: grid;
     grid-template-columns: 1fr;
     align-items: start;
     gap: 16px;
@@ -2298,6 +2298,29 @@ input:focus, select:focus { border-color: var(--brand-main); box-shadow: 0 0 0 3
     display: block;
     width: 14px;
     height: 14px;
+}
+
+.log-profile-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.log-profile-tab {
+    border: 1px solid var(--border-light);
+    background: rgba(255,255,255,0.03);
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 6px 12px;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.log-profile-tab.active {
+    color: var(--text-primary);
+    border-color: rgba(255,42,68,0.62);
+    background: rgba(255,42,68,0.14);
 }
 
 /* ADB Devices Panel Styles */

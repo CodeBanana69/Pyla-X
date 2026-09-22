@@ -10,6 +10,7 @@ from typing import Any
 from packaging import version
 from werkzeug.utils import secure_filename
 
+from instance_profiles import get_registry
 from utils import (
     api_base_url,
     clean_queue,
@@ -186,11 +187,32 @@ class WebDataService:
             config["record_debug_preview_clips"] = False
         return config
 
-    def _load_config(self, path: str) -> dict[str, Any]:
+    def _load_raw_config(self, path: str) -> dict[str, Any]:
         return load_toml_as_dict(path).copy()
+
+    def _load_config(self, path: str) -> dict[str, Any]:
+        registry = get_registry()
+        return registry.apply_file_overrides(registry.active_id(), path, self._load_raw_config(path))
 
     def _save_config(self, path: str, data: dict[str, Any]):
         save_dict_as_toml(data, path)
+
+    def _section_schema(self, section: str) -> tuple[dict[str, tuple[str, Any]], str]:
+        schema_map = {
+            "general": (self.GENERAL_FIELDS, "cfg/general_config.toml"),
+            "bot": (self.BOT_FIELDS, "cfg/bot_config.toml"),
+            "timers": (self.TIMER_FIELDS, "cfg/time_tresholds.toml"),
+            "debug": (self.DEBUG_FIELDS, "cfg/debug_settings.toml"),
+            "webhook": (self.WEBHOOK_FIELDS, "cfg/webhook_config.toml"),
+        }
+        if section not in schema_map:
+            raise KeyError(f"Unknown settings section: {section}")
+        return schema_map[section]
+
+    def _annotate_sync(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
+        schema, _path = self._section_schema(section)
+        payload["_sync"] = get_registry().sync_map(section, list(schema))
+        return payload
 
     def _load_startup_queue_if_enabled(self):
         general_config = self._load_config("cfg/general_config.toml")
@@ -332,7 +354,7 @@ class WebDataService:
         if not runtime_status.get("is_running"):
             return
 
-        queue_path = resolve_project_path("latest_brawler_data.json")
+        queue_path = get_registry().queue_path(get_registry().active_id())
         if not queue_path.exists():
             return
 
@@ -506,9 +528,12 @@ class WebDataService:
         if not script.strip():
             raise ValueError("Playstyle file is empty or invalid.")
 
-        bot_config = self._load_config("cfg/bot_config.toml")
-        bot_config["current_playstyle"] = filename
-        self._save_config("cfg/bot_config.toml", bot_config)
+        registry = get_registry()
+        registry.set_playstyle(registry.active_id(), filename)
+        if registry.active_id() == "default":
+            bot_config = self._load_raw_config("cfg/bot_config.toml")
+            bot_config["current_playstyle"] = filename
+            self._save_config("cfg/bot_config.toml", bot_config)
         return {"ok": True, "playstyles": self.get_playstyles_payload(), "metadata": metadata}
 
     def delete_playstyle(self, filename: str) -> dict[str, Any]:
@@ -570,16 +595,15 @@ class WebDataService:
     def get_settings_payload(self, section: str) -> dict[str, Any]:
         section = section.lower()
         if section == "general":
-            return self._select_fields(self._load_config("cfg/general_config.toml"), self.GENERAL_FIELDS)
-        if section == "bot":
+            payload = self._select_fields(self._load_config("cfg/general_config.toml"), self.GENERAL_FIELDS)
+        elif section == "bot":
             payload = self._select_fields(self._load_config("cfg/bot_config.toml"), self.BOT_FIELDS)
             payload["current_playstyle"] = self._load_config("cfg/bot_config.toml").get("current_playstyle", "default_up.pyla")
-            return payload
-        if section == "timers":
-            return self._select_fields(self._load_config("cfg/time_tresholds.toml"), self.TIMER_FIELDS)
-        if section == "debug":
-            return self._select_fields(self._normalize_debug_settings(self._load_config("cfg/debug_settings.toml")), self.DEBUG_FIELDS)
-        if section == "webhook":
+        elif section == "timers":
+            payload = self._select_fields(self._load_config("cfg/time_tresholds.toml"), self.TIMER_FIELDS)
+        elif section == "debug":
+            payload = self._select_fields(self._normalize_debug_settings(self._load_config("cfg/debug_settings.toml")), self.DEBUG_FIELDS)
+        elif section == "webhook":
             config = self._load_config("cfg/webhook_config.toml")
             payload = self._select_fields(config, self.WEBHOOK_FIELDS)
             payload["_secret_status"] = {
@@ -588,84 +612,146 @@ class WebDataService:
             }
             for key in self.SECRET_WEBHOOK_FIELDS:
                 payload[key] = ""
-            return payload
-        raise KeyError(f"Unknown settings section: {section}")
+        else:
+            raise KeyError(f"Unknown settings section: {section}")
+        return self._annotate_sync(section, payload)
 
     def update_settings(self, section: str, payload: dict[str, Any]) -> dict[str, Any]:
         section = section.lower()
         payload = payload or {}
-        if section == "general":
-            config = self._load_config("cfg/general_config.toml")
-            self._save_config("cfg/general_config.toml", self._apply_updates(config, self.GENERAL_FIELDS, payload))
-            if "play_order" in payload and self.get_settings_payload("general").get("play_order") != "in_order":
-                self.save_queue_data([
-                    {**entry, "automatically_pick": True}
-                    for entry in self.get_queue_data()
-                ])
-            return self.get_settings_payload("general")
-        if section == "bot":
-            config = self._load_config("cfg/bot_config.toml")
-            if "current_playstyle" in payload:
-                config["current_playstyle"] = str(payload["current_playstyle"])
-            self._save_config("cfg/bot_config.toml", self._apply_updates(config, self.BOT_FIELDS, payload))
-            return self.get_settings_payload("bot")
-        if section == "timers":
-            config = self._load_config("cfg/time_tresholds.toml")
-            self._save_config("cfg/time_tresholds.toml", self._apply_updates(config, self.TIMER_FIELDS, payload))
-            return self.get_settings_payload("timers")
+        schema, path = self._section_schema(section)
+        registry = get_registry()
+        profile_id = registry.active_id()
+        raw = self._load_raw_config(path)
+        synced_updates: dict[str, Any] = {}
+        unsynced_updates: dict[str, Any] = {}
+        for key, value in payload.items():
+            if section == "bot" and key == "current_playstyle":
+                unsynced_updates[key] = value
+                continue
+            if key not in schema:
+                continue
+            if (
+                key in self.SECRET_WEBHOOK_FIELDS
+                and isinstance(value, str)
+                and not value.strip()
+            ):
+                continue
+            if registry.is_synced(section, key):
+                synced_updates[key] = value
+            else:
+                unsynced_updates[key] = value
+
+        if synced_updates:
+            updated = self._apply_updates(dict(raw), schema, synced_updates)
+            if section == "debug":
+                updated = self._normalize_debug_settings(updated)
+            self._save_config(path, updated)
+            raw = updated
+            for key in synced_updates:
+                registry.clear_overrides_for_key(section, key)
+                if key == "emulator_port":
+                    for profile in registry.list_profiles():
+                        registry.set_adb_port(profile["id"], int(updated["emulator_port"]), allow_duplicate=True)
+
+        for key, value in unsynced_updates.items():
+            if key == "current_playstyle":
+                registry.set_playstyle(profile_id, str(value))
+                if profile_id == "default":
+                    mirrored = self._load_raw_config(path)
+                    mirrored["current_playstyle"] = str(value)
+                    self._save_config(path, mirrored)
+                continue
+            value_type, _default = schema[key]
+            parsed = self._serialize(value_type, self._deserialize(value_type, value))
+            if key == "emulator_port":
+                registry.set_adb_port(profile_id, int(parsed))
+                if profile_id == "default":
+                    mirrored = self._load_raw_config(path)
+                    mirrored["emulator_port"] = int(parsed)
+                    self._save_config(path, mirrored)
+                continue
+            registry.set_override(profile_id, section, key, parsed)
+
         if section == "debug":
-            config = self._load_config("cfg/debug_settings.toml")
-            updated_config = self._normalize_debug_settings(self._apply_updates(config, self.DEBUG_FIELDS, payload))
-            self._save_config("cfg/debug_settings.toml", updated_config)
-            return self.get_settings_payload("debug")
-        if section == "webhook":
-            config = self._load_config("cfg/webhook_config.toml")
-            self._save_config("cfg/webhook_config.toml", self._apply_updates(config, self.WEBHOOK_FIELDS, payload))
-            return self.get_settings_payload("webhook")
-        raise KeyError(f"Unknown settings section: {section}")
+            self._normalize_debug_profile(profile_id, path)
+
+        if section == "general" and "play_order" in payload and self.get_settings_payload("general").get("play_order") != "in_order":
+            self.save_queue_data([
+                {**entry, "automatically_pick": True}
+                for entry in self.get_queue_data()
+            ])
+        return self.get_settings_payload(section)
 
     def reset_settings(self, section: str) -> dict[str, Any]:
         section = section.lower()
-        schema_map = {
-            "general": (self.GENERAL_FIELDS, "cfg/general_config.toml"),
-            "bot": (self.BOT_FIELDS, "cfg/bot_config.toml"),
-            "timers": (self.TIMER_FIELDS, "cfg/time_tresholds.toml"),
-            "debug": (self.DEBUG_FIELDS, "cfg/debug_settings.toml"),
-            "webhook": (self.WEBHOOK_FIELDS, "cfg/webhook_config.toml"),
-        }
-        if section not in schema_map:
-            raise KeyError(f"Unknown settings section: {section}")
+        schema, path = self._section_schema(section)
+        registry = get_registry()
+        profile_id = registry.active_id()
+        config = self._load_raw_config(path)
 
-        schema, path = schema_map[section]
-        
-        # Load the existing configuration to preserve other non-schema keys (like wall_model_classes)
-        config = self._load_config(path)
-        
-        # Reset schema fields to their default values defined in services.py
         for key, (value_type, default_val) in schema.items():
-            config[key] = self._serialize(value_type, default_val)
-            
-        # Ensure specified credential fields are empty as requested
-        if section == "general":
-            config["player_tag"] = ""
-        elif section == "webhook":
-            config["discord_id"] = ""
-            config["discord_bot_token"] = ""
-            config["discord_guild_id"] = ""
-            
+            serialized = self._serialize(value_type, default_val)
+            if section == "general" and key == "player_tag":
+                serialized = ""
+            elif section == "webhook" and key in {"discord_id", "discord_bot_token", "discord_guild_id"}:
+                serialized = ""
+            if registry.is_synced(section, key):
+                config[key] = serialized
+                registry.clear_overrides_for_key(section, key)
+                if key == "emulator_port":
+                    for profile in registry.list_profiles():
+                        registry.set_adb_port(profile["id"], int(serialized), allow_duplicate=True)
+            elif key == "emulator_port":
+                registry.set_adb_port(profile_id, int(serialized))
+                if profile_id == "default":
+                    config["emulator_port"] = int(serialized)
+            else:
+                registry.set_override(profile_id, section, key, serialized)
+
+        if section == "debug":
+            config = self._normalize_debug_settings(config)
         self._save_config(path, config)
 
-        # Post-reset processing
-        if section == "general":
-            if self.get_settings_payload("general").get("play_order") != "in_order":
-                self.save_queue_data([
-                    {**entry, "automatically_pick": True}
-                    for entry in self.get_queue_data()
-                ])
-        elif section == "debug":
-            config = self._load_config("cfg/debug_settings.toml")
-            self._save_config("cfg/debug_settings.toml", self._normalize_debug_settings(config))
+        if section == "general" and self.get_settings_payload("general").get("play_order") != "in_order":
+            self.save_queue_data([
+                {**entry, "automatically_pick": True}
+                for entry in self.get_queue_data()
+            ])
+        return self.get_settings_payload(section)
 
+    def _normalize_debug_profile(self, profile_id: str, path: str) -> None:
+        registry = get_registry()
+        raw = self._load_raw_config(path)
+        effective = registry.apply_file_overrides(profile_id, path, raw)
+        normalized = self._normalize_debug_settings(dict(effective))
+        for key in ("advanced_debug_visuals", "record_debug_preview_clips"):
+            if normalized.get(key) == effective.get(key):
+                continue
+            if registry.is_synced("debug", key):
+                raw[key] = normalized[key]
+                registry.clear_overrides_for_key("debug", key)
+                self._save_config(path, raw)
+            else:
+                registry.set_override(profile_id, "debug", key, normalized[key])
+
+    def set_setting_sync(self, section: str, key: str, synced: bool) -> dict[str, Any]:
+        section = section.lower()
+        schema, path = self._section_schema(section)
+        if key not in schema:
+            raise KeyError(f"Unknown setting '{key}' in section '{section}'.")
+        registry = get_registry()
+        raw = self._load_raw_config(path)
+        effective = registry.apply_file_overrides(registry.active_id(), path, raw)
+        value_type, default = schema[key]
+        active_value = effective.get(key, default)
+        shared_value = raw.get(key, default)
+        action = registry.set_key_synced(section, key, bool(synced), active_value, shared_value)
+        if action == "write_shared":
+            raw[key] = self._serialize(value_type, self._deserialize(value_type, active_value))
+            if section == "debug":
+                raw = self._normalize_debug_settings(raw)
+            self._save_config(path, raw)
         return self.get_settings_payload(section)
 
     def get_player_info_payload(self, player_tag: str) -> dict[str, Any]:
@@ -733,9 +819,18 @@ class WebDataService:
             "win_rate": 0.0,
             "trophy_delta": 0,
         }
-        csv_path = resolve_project_path("cfg", "match_history.csv")
+        csv_path = get_registry().history_path(get_registry().active_id())
 
         grouped: dict[str, dict[str, Any]] = {}
+
+        if not csv_path.exists():
+            response = self._build_match_history_response([], session_summary=session_summary)
+            response["date_filter"] = {
+                "start_date": start_date.isoformat() if start_date else None,
+                "end_date": end_date.isoformat() if end_date else None,
+                "inclusive": True,
+            }
+            return response
 
         with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
@@ -929,6 +1024,93 @@ class WebDataService:
             "items": items,
         }
 
+    def get_profiles_payload(self) -> dict[str, Any]:
+        registry = get_registry()
+        active_id = registry.active_id()
+        items = []
+        for profile in registry.list_profiles():
+            public = {key: value for key, value in profile.items() if key != "overrides"}
+            items.append({
+                **public,
+                "is_active": profile["id"] == active_id,
+                "runtime": self.runtime_manager.get_status(profile["id"]),
+            })
+        return {"active_profile_id": active_id, "items": items}
+
+    def profile_context_payload(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "profiles": self.get_profiles_payload(),
+            "runtime": self.runtime_manager.get_status(),
+            "queue": self.get_queue_data(),
+            "playstyles": self.get_playstyles_payload(),
+            "settings": {
+                "general": self.get_settings_payload("general"),
+                "bot": self.get_settings_payload("bot"),
+                "timers": self.get_settings_payload("timers"),
+                "debug": self.get_settings_payload("debug"),
+                "webhook": self.get_settings_payload("webhook"),
+            },
+            "history": self.get_match_history_payload(),
+        }
+
+    def _reload_active_queue(self) -> None:
+        self._runtime_queue_mtime = None
+        loaded = load_brawler_data()
+        self._queue_items = []
+        for item in loaded:
+            try:
+                self._queue_items.append(self.normalize_queue_entry(item))
+            except Exception:
+                continue
+
+    def use_profile(self, profile_id: str) -> dict[str, Any]:
+        get_registry().set_active(profile_id)
+        self._reload_active_queue()
+        return self.profile_context_payload()
+
+    def create_profile(self, name: str) -> dict[str, Any]:
+        profile = get_registry().create_profile(name)
+        return self.use_profile(profile["id"])
+
+    def rename_profile(self, profile_id: str, name: str) -> dict[str, Any]:
+        get_registry().rename_profile(profile_id, name)
+        return self.get_profiles_payload()
+
+    def delete_profile(self, profile_id: str) -> dict[str, Any]:
+        status = self.runtime_manager.get_status(profile_id)
+        if status.get("is_running"):
+            raise ValueError("Stop this profile before deleting it.")
+        get_registry().delete_profile(profile_id)
+        self._reload_active_queue()
+        return self.profile_context_payload()
+
+    def update_profile(self, profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        registry = get_registry()
+        if "name" in payload and str(payload.get("name") or "").strip():
+            registry.rename_profile(profile_id, payload["name"])
+        if "playstyle" in payload and payload.get("playstyle"):
+            registry.set_playstyle(profile_id, str(payload["playstyle"]))
+        if "adb_port" in payload and payload.get("adb_port") not in (None, ""):
+            port = registry.set_adb_port(
+                profile_id,
+                int(payload["adb_port"]),
+                allow_duplicate=registry.is_synced("general", "emulator_port"),
+            )
+            if profile_id == "default" or registry.is_synced("general", "emulator_port"):
+                raw = self._load_raw_config("cfg/general_config.toml")
+                raw["emulator_port"] = port
+                self._save_config("cfg/general_config.toml", raw)
+                if registry.is_synced("general", "emulator_port"):
+                    for profile in registry.list_profiles():
+                        registry.set_adb_port(profile["id"], port, allow_duplicate=True)
+        return self.profile_context_payload()
+
+    def assign_adb_port(self, port: int, profile_id: str | None = None) -> dict[str, Any]:
+        registry = get_registry()
+        profile_id = profile_id or registry.active_id()
+        return self.update_profile(profile_id, {"adb_port": port})
+
     def get_bootstrap_payload(self) -> dict[str, Any]:
         discord_link = get_discord_link()
         auth_payload = self.get_auth_state()
@@ -943,6 +1125,7 @@ class WebDataService:
             "announcements": self.get_announcements_safe(),
             "auth": auth_payload,
             "runtime": self.runtime_manager.get_status(),
+            "profiles": self.get_profiles_payload(),
             "links": {
                 "discord": {
                     "label": discord_link,

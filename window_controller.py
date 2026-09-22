@@ -8,6 +8,7 @@ import time
 import scrcpy
 from adbutils import adb, AdbDevice
 from debug_view import DebugViewPublisher
+from port_finder import SHALLOW_ADB_PORTS
 from utils import config_bool, load_toml_as_dict, save_dict_as_toml, invalidate_toml_cache
 
 brawl_stars_width, brawl_stars_height = 1920, 1080
@@ -58,8 +59,9 @@ def adb_device_port_sort_key(device: AdbDevice) -> tuple[float, int, str]:
     return float("inf"), 2, serial
 
 
-def discover_device(verbose: bool = False) -> AdbDevice:
-    preferred_port = load_toml_as_dict("cfg/general_config.toml").get("emulator_port")
+def discover_device(verbose: bool = False, preferred_port=None) -> AdbDevice:
+    if preferred_port is None:
+        preferred_port = load_toml_as_dict("cfg/general_config.toml").get("emulator_port")
 
     def _safe_connect(port: int):
         dev = adb.connect(f"127.0.0.1:{port}")
@@ -87,7 +89,7 @@ def discover_device(verbose: bool = False) -> AdbDevice:
             if verbose:
                 print(f"Warning: Error handling preferred port connection: {e}")
 
-    candidates = [5137, 5555, 16384, 7555, 5635, 62001, 62025, 62026, 7556, 7565, 16416] + list(range(5556, 5566)) + list(range(5565, 5756, 10)) + list(range(16385, 16415))
+    candidates = list(SHALLOW_ADB_PORTS)
 
     def _try(port):
         try:
@@ -116,7 +118,7 @@ def discover_device(verbose: bool = False) -> AdbDevice:
     return chosen
 
 class WindowController:
-    def __init__(self, max_fps="auto"):
+    def __init__(self, max_fps="auto", adb_port=None):
         self.scale_factor = None
         self.width = None
         self.height = None
@@ -131,7 +133,7 @@ class WindowController:
         )
         print("Connecting to ADB (might take up to 2 minutes)...")
         try:
-            self.device = discover_device(verbose=self.verbose_debug)
+            self.device = discover_device(verbose=self.verbose_debug, preferred_port=adb_port)
             print(f"Connected to device: {self.device.serial}")
 
             self.frame_lock = threading.Lock()
