@@ -165,7 +165,7 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
             save_brawler_data(data)
             print("Starting with queue data:", data)
             self.playstyle_info, pyla_code = load_pyla_script(current_playstyle)
-            self.Play = Play(*self.load_models(), self.window_controller, pyla_code)
+            self.Play = Play(*self.load_models(), self.window_controller, pyla_code, playstyle_info=self.playstyle_info)
             self.Time_management = TimeManagement()
             self.lobby_automator = LobbyAutomation(self.window_controller)
             self.runtime_control = runtime_control

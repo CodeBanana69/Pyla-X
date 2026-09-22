@@ -89,6 +89,13 @@ class WebDataService:
         "super_pixels_minimum": ("float", 1800.0),
         "gadget_pixels_minimum": ("float", 1300.0),
         "hypercharge_pixels_minimum": ("float", 1800.0),
+        "avoid_poison_gas": ("bool", True),
+        "brawlball_cage_escape": ("bool", True),
+        "map_boundary_awareness": ("bool", True),
+        "showdown_teammate_focus": ("bool", True),
+        "recover_unwanted_gamemode": ("bool", True),
+        "configured_gamemode": ("str", ""),
+        "map_mode": ("str", "auto"),
     }
 
     TIMER_FIELDS: dict[str, tuple[str, Any]] = {

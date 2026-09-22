@@ -6,6 +6,21 @@ import numpy as np
 import os
 
 from detect import Detect
+from gameplay_safety import (
+    BOUNDARY_MODES,
+    apply_safety_policy,
+    avoid_directional_gas,
+    clamp_point_to_regions,
+    default_map_layout,
+    detect_brawlball_cage,
+    detect_wall_cage,
+    legal_regions,
+    normalize_gamemode,
+    poison_gas_avoidance,
+    resolve_configured_gamemode,
+    scale_layout,
+    teammate_focus_movement,
+)
 from state_finder import get_state
 from utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info, interpret_pyla_code, \
     count_mask_pixels, JOYSTICK_RADIUS, clamp, config_bool, is_safe_ast
@@ -21,7 +36,7 @@ PLAYER_HIT_CIRCLE_RADIUS = 53
 
 class Play:
 
-    def __init__(self, main_info_model, tile_detector_model, close_tile_detector_model, window_controller, pyla_code):
+    def __init__(self, main_info_model, tile_detector_model, close_tile_detector_model, window_controller, pyla_code, playstyle_info=None):
         bot_config = load_toml_as_dict("cfg/bot_config.toml")
         time_config = load_toml_as_dict("cfg/time_tresholds.toml")
         self.fix_movement_keys = {
@@ -57,6 +72,14 @@ class Play:
         bot_config = load_toml_as_dict("cfg/bot_config.toml")
         time_config = load_toml_as_dict("cfg/time_tresholds.toml")
         self.verbose_debug = config_bool(load_toml_as_dict("cfg/debug_settings.toml").get('verbose_debug'), False)
+        self.playstyle_info = playstyle_info or {}
+        self.avoid_poison_gas = config_bool(bot_config.get("avoid_poison_gas"), True)
+        self.brawlball_cage_escape = config_bool(bot_config.get("brawlball_cage_escape"), True)
+        self.map_boundary_awareness = config_bool(bot_config.get("map_boundary_awareness"), True)
+        self.showdown_teammate_focus = config_bool(bot_config.get("showdown_teammate_focus"), True)
+        self.map_mode = str(bot_config.get("map_mode") or "auto")
+        self.configured_gamemode = resolve_configured_gamemode(bot_config, self.playstyle_info)
+        self.last_safety_decision = None
         if self.verbose_debug:
             if not os.path.exists("debug_frames"):
                 os.makedirs("debug_frames")
@@ -534,6 +557,119 @@ class Play:
         target_y = y * scale * self.window_controller.height_ratio
         return target_x, target_y
 
+    def resolved_map_mode(self):
+        explicit = normalize_gamemode(self.map_mode)
+        if explicit and explicit != "auto":
+            return explicit
+        configured = normalize_gamemode(self.configured_gamemode)
+        if configured:
+            return configured
+        return ""
+
+    def _scaled_layout(self, mode):
+        width_ratio = getattr(self.window_controller, "width_ratio", 1) or 1
+        height_ratio = getattr(self.window_controller, "height_ratio", 1) or 1
+        return scale_layout(default_map_layout(mode), width_ratio, height_ratio)
+
+    def clamp_world_target(self, point):
+        mode = self.resolved_map_mode()
+        if point is None or not self.map_boundary_awareness or mode not in BOUNDARY_MODES:
+            return point
+        layout = self._scaled_layout(mode)
+        clamped, _changed = clamp_point_to_regions(point, legal_regions(mode, layout["field"], layout["goals"]))
+        return clamped
+
+    def bounded_find_closest_enemy(self, enemy_data, player_coords, walls, skill_type):
+        enemy_pos, distance = self.find_closest_enemy(enemy_data, player_coords, walls, skill_type)
+        if enemy_pos is None:
+            return enemy_pos, distance
+        return self.clamp_world_target(enemy_pos), distance
+
+    def context_avoid_showdown_gas(self, player_data=None, safe_center=None, safe_radius=None, edge_margin=80):
+        player_box = player_data if player_data is not None else (self.context or {}).get("player_data")
+        if safe_center is not None and safe_radius is not None and player_box is not None:
+            decision = poison_gas_avoidance(self.get_entity_pos(player_box), safe_center, safe_radius, edge_margin)
+            return decision["movement"]
+        if player_box is None or self.frame is None:
+            return None
+        return avoid_directional_gas(self.is_there_poison_gas(player_box))
+
+    def context_focus_teammates(self, teammates=None, player_pos=None):
+        context = self.context or {}
+        if player_pos is None:
+            player_box = context.get("player_data")
+            if not player_box:
+                return None
+            player_pos = self.get_entity_pos(player_box)
+        if teammates is None:
+            teammates = context.get("teammate_data") or []
+        focus = teammate_focus_movement(player_pos, teammates, enabled=self.showdown_teammate_focus)
+        return focus["movement"]
+
+    def context_cage_escape(self, player_pos=None, cages=None, map_center=None, walls=None):
+        context = self.context or {}
+        if player_pos is None:
+            player_box = context.get("player_data")
+            if not player_box:
+                return None
+            player_pos = self.get_entity_pos(player_box)
+        mode = self.resolved_map_mode()
+        layout = self._scaled_layout(mode or "brawlball")
+        cages = layout["cages"] if cages is None else cages
+        map_center = layout["center"] if map_center is None else map_center
+        walls = context.get("walls") if walls is None else walls
+        cage = detect_brawlball_cage(player_pos, cages, map_center)
+        if not cage["trapped"]:
+            cage = detect_wall_cage(player_pos, walls or [], map_center)
+        if not cage["trapped"]:
+            return None
+        return {"movement": cage["movement"], "path": cage["path"]}
+
+    def apply_gameplay_safety(self, movement_vector):
+        context = self.context or {}
+        player_box = context.get("player_data")
+        if not player_box:
+            return movement_vector
+        try:
+            player_pos = self.get_entity_pos(player_box)
+            mode = self.resolved_map_mode()
+            layout = self._scaled_layout(mode or "knockout")
+            directional = None
+            if self.avoid_poison_gas and self.frame is not None:
+                try:
+                    directional = self.is_there_poison_gas(player_box)
+                except Exception:
+                    directional = None
+            aim = None
+            enemies = context.get("enemy_data") or []
+            if enemies:
+                enemy_pos, _distance = self.find_closest_enemy(enemies, player_pos, context.get("walls") or [], "attack")
+                aim = enemy_pos
+            use_bounds = self.map_boundary_awareness and mode in BOUNDARY_MODES
+            use_cage = self.brawlball_cage_escape and mode in {"brawlball", "brawlball_5v5"}
+            decision = apply_safety_policy(
+                player_pos=player_pos,
+                playstyle_movement=movement_vector,
+                aim_target=aim,
+                mode=mode,
+                cages=layout["cages"] if use_cage else None,
+                map_center=layout["center"],
+                field=layout["field"] if use_bounds else None,
+                goals=layout["goals"] if use_bounds else None,
+                walls=context.get("walls") or [],
+                directional_gas=directional,
+                teammates=context.get("teammate_data") or [],
+                avoid_gas=self.avoid_poison_gas,
+                cage_escape=self.brawlball_cage_escape,
+                boundary_awareness=self.map_boundary_awareness,
+                teammate_focus=self.showdown_teammate_focus,
+            )
+            self.last_safety_decision = decision
+            return decision["movement"]
+        except Exception as exc:
+            print(f"Gameplay safety skipped: {exc}")
+            return movement_vector
+
     def loop(self, brawler, data, current_time):
         self.context = {
                 'player_data': data['player'][0],
@@ -564,9 +700,13 @@ class Play:
                 'seconds_to_hold_attack_after_reaching_max': self.seconds_to_hold_attack_after_reaching_max,
                 "width": brawl_stars_width,
                 "height": brawl_stars_height,
-                'find_closest_enemy': self.find_closest_enemy,
+                'find_closest_enemy': self.bounded_find_closest_enemy,
                 'find_closest_teammate': self.find_closest_teammate,
                 'is_there_poison_gas': self.is_there_poison_gas,
+                'avoid_showdown_gas': self.context_avoid_showdown_gas,
+                'focus_showdown_teammates': self.context_focus_teammates,
+                'cage_escape_movement': self.context_cage_escape,
+                'clamp_world_target': self.clamp_world_target,
                 'is_path_blocked': self.is_path_blocked,
                 'is_enemy_hittable': self.is_enemy_hittable,
                 'time': time,
@@ -580,7 +720,7 @@ class Play:
                 'height_ratio': self.window_controller.height_ratio
             }
         movement = self.get_movement()
-        movement_vector = self.movement_to_vector(movement)
+        movement_vector = self.apply_gameplay_safety(self.movement_to_vector(movement))
         if movement_vector is None:
             self.window_controller.release_movement()
             self.last_movement = ''

@@ -2,9 +2,16 @@ import sys
 import time
 import cv2
 
+from gameplay_safety import (
+    BuffieController,
+    buffie_detection_from_labels,
+    gamemode_recovery_action,
+    latch_underdog,
+    resolve_configured_gamemode,
+)
 from state_finder import find_popup_close, get_state, is_underdog
 from trophy_observer import TrophyObserver, MatchResult
-from utils import find_template_center, load_toml_as_dict, notify_user, save_brawler_data
+from utils import config_bool, find_template_center, load_toml_as_dict, notify_user, save_brawler_data
 
 def load_image(image_path, scale_factor):
     image = cv2.imread(image_path)
@@ -27,7 +34,11 @@ class StageManager:
         self.brawlers_pick_data = brawlers_data
         self.Trophy_observer = TrophyObserver()
         self.time_since_last_stat_change = time.time()
-        self.play_again_on_win = load_toml_as_dict("./cfg/bot_config.toml")["play_again_on_win"] == "yes"
+        bot_config = load_toml_as_dict("./cfg/bot_config.toml")
+        self.play_again_on_win = bot_config["play_again_on_win"] == "yes"
+        self.recover_unwanted_gamemode = config_bool(bot_config.get("recover_unwanted_gamemode"), True)
+        self.configured_gamemode = resolve_configured_gamemode(bot_config, playstyle_info)
+        self.buffie = BuffieController()
         self.window_controller = window_controller
         self.states = {
             'shop': self.quit_shop,
@@ -49,6 +60,7 @@ class StageManager:
             'end_trio_showdown_1': self.end_game,
             'end_trio_showdown_2': self.end_game,
             'end_trio_showdown_3': self.end_game,
+            'buffie': self.handle_buffie,
         }
         self.matches_since_last_webhook_ping = 0
         self.ping_every_x_match = load_toml_as_dict("cfg/webhook_config.toml")['ping_every_x_match']
@@ -88,6 +100,9 @@ class StageManager:
 
     def start_game(self):
         if self._should_stop() or self._should_pause():
+            return
+
+        if self.recover_unwanted_gamemode and self._recover_unwanted_gamemode():
             return
 
         print("state is lobby, starting game")
@@ -181,7 +196,9 @@ class StageManager:
         button_pressed = False
         end_screen_time = time.time()
         parsed_result = None
+        underdog_seen = False
         while current_state.startswith("end") and time.time() - end_screen_time < 35:
+            underdog_seen = latch_underdog(underdog_seen, is_underdog(screenshot))
 
             if time.time() - self.time_since_last_stat_change > 25 and parsed_result is None :
                 raw_found_result = '_'.join(current_state.split("_")[1:])
@@ -189,10 +206,9 @@ class StageManager:
 
                 current_brawler = self.brawlers_pick_data[0]['brawler']
                 power_level = None
-                underdog = is_underdog(screenshot)
-                if underdog:
+                if underdog_seen:
                     print("Underdog detected for this match.")
-                self.Trophy_observer.add_trophies(parsed_result, current_brawler, self.playstyle_info, underdog, power_level)
+                self.Trophy_observer.add_trophies(parsed_result, current_brawler, self.playstyle_info, underdog_seen, power_level)
                 self.Trophy_observer.add_win(parsed_result)
                 self.time_since_last_stat_change = time.time()
                 values = {
@@ -243,6 +259,39 @@ class StageManager:
             print("End screen timeout reached, restarting the game.")
             self.window_controller.restart_brawl_stars()
         print("Game has ended", current_state)
+
+    def _recover_unwanted_gamemode(self):
+        try:
+            menu_text = self.Lobby_automation.lobby_menu_text()
+        except Exception as exc:
+            print(f"Gamemode check failed: {exc}")
+            return False
+        action = gamemode_recovery_action(
+            None,
+            self.configured_gamemode,
+            menu_text=menu_text,
+            enabled=True,
+        )
+        if not action.get("needed"):
+            return False
+        print(
+            f"Lobby dropped into {action['detected']}. "
+            f"Switching back to {action['configured']}."
+        )
+        self.Lobby_automation.perform_gamemode_switch(action)
+        return True
+
+    def handle_buffie(self):
+        menu_text = []
+        try:
+            menu_text = self.Lobby_automation.lobby_menu_text()
+        except Exception as exc:
+            print(f"Buffie UI read failed: {exc}")
+        detection = buffie_detection_from_labels(menu_text)
+        detection["buffie_visible"] = True
+        action = self.buffie.step(detection)
+        print(f"Buffie step: {action['state']} -> {action['action']}")
+        self.Lobby_automation.perform_buffie_action(action)
 
     def quit_shop(self):
         self.window_controller.click(100 * self.window_controller.width_ratio, 60 * self.window_controller.height_ratio)
