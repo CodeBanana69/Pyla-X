@@ -475,6 +475,61 @@ class WebDataService:
         self.save_queue_data(updated_queue)
         return {"items": self.get_queue_data(), "added_count": len(below_target)}
 
+    def list_brawler_trophies(self, player_tag: str | None = None) -> list[dict[str, Any]]:
+        """Trophy counts used by remote ``/push_all``.
+
+        Live player data wins. Otherwise the latest recorded match trophies
+        and the current queue fill in brawlers this instance already knows.
+        """
+        if player_tag is None:
+            player_tag = str(self.get_settings_payload("general").get("player_tag", "") or "")
+        clean_tag = str(player_tag).replace("#", "").replace("%23", "").strip()
+        by_key: dict[str, dict[str, Any]] = {}
+
+        if clean_tag:
+            player_info = get_player_info(clean_tag)
+            if self._has_player_values(player_info):
+                for name in self._resolve_brawler_catalog():
+                    trophies, win_streak = get_brawler_stats(player_info, name)
+                    if trophies is None:
+                        continue
+                    by_key[name.lower()] = {
+                        "brawler": name,
+                        "trophies": int(trophies or 0),
+                        "win_streak": int(win_streak or 0),
+                    }
+
+        if not by_key:
+            try:
+                history_items = self.get_match_history_payload().get("items") or []
+            except Exception:
+                history_items = []
+            for item in history_items:
+                if item.get("current_trophies") is None:
+                    continue
+                key = str(item.get("brawler") or "").lower()
+                if not key:
+                    continue
+                by_key[key] = {
+                    "brawler": item["brawler"],
+                    "trophies": int(item["current_trophies"]),
+                    "win_streak": int(item.get("best_win_streak") or 0),
+                }
+            for entry in self.get_queue_data():
+                key = entry["brawler"].lower()
+                by_key.setdefault(key, {
+                    "brawler": entry["brawler"],
+                    "trophies": int(entry.get("trophies") or 0),
+                    "wins": int(entry.get("wins") or 0),
+                    "win_streak": int(entry.get("win_streak") or 0),
+                })
+        return list(by_key.values())
+
+    def get_recent_matches(self, limit: int = 10) -> list[dict[str, Any]]:
+        from bot_instances import read_recent_matches
+
+        return read_recent_matches(resolve_project_path("cfg", "match_history.csv"), limit)
+
     def get_playstyles_payload(self) -> dict[str, Any]:
         bot_config = self._load_config("cfg/bot_config.toml")
         current_playstyle = bot_config.get("current_playstyle", "default_up.pyla")
