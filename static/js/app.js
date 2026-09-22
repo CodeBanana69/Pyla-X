@@ -122,6 +122,7 @@ const SETTINGS_META = {
         { key: "emulator_port", label: "Emulator Port", type: "number", help: "ADB port used for the emulator instance." },
         { key: "brawl_stars_package", label: "Package Name", type: "text", help: "Android package used when restarting Brawl Stars." },
         { key: "auto_load_queue_on_startup", label: "Load Queue On Startup", type: "checkbox", help: "Load the latest saved queue when the web UI starts." },
+        { key: "capture_backend", label: "Screen Capture", type: "select", options: [{ value: "scrcpy", label: "scrcpy" }, { value: "mumu", label: "MuMu Screen Capture" }], help: "Frame source. MuMu Screen Capture skips scrcpy encoding to cut input delay. Touch input still uses scrcpy." },
     ],
     debug: [
         { key: "verbose_debug", label: "Verbose Debug", type: "checkbox", help: "Enable extra runtime debugging output." },
@@ -135,6 +136,8 @@ const SETTINGS_META = {
     bot: [
         { key: "play_again_on_win", label: "Play Again On Win", type: "checkbox", help: "Chain another match immediately after a win." },
         { key: "minimum_movement_delay", label: "Minimum Movement Delay", type: "number", step: "0.1", help: "Lower bound between movement actions." },
+        { key: "aim_default_delay", label: "Aim Delay Default", type: "number", step: "0.01", help: "Assumed capture plus input delay before a latency sample exists. Predictive aim leads by this many seconds." },
+        { key: "aim_max_delay", label: "Aim Delay Cap", type: "number", step: "0.01", help: "Upper bound for the measured aim and movement delay." },
         { key: "unstuck_movement_delay", label: "Unstuck Delay", type: "number", step: "0.1", help: "Delay before the unstuck routine fires." },
         { key: "unstuck_movement_hold_time", label: "Unstuck Hold Time", type: "number", step: "0.1", help: "How long the unstuck move is held." },
         { key: "perceived_tile_size", label: "Perceived Tile Size", type: "number", help: "Map tile size in pixels used by playstyle movement and wall-aware targeting." },

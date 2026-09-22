@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import os
 
+from aiming import DynamicDelay, MotionTracker, aim_at_target, stick_to_world_velocity
 from detect import Detect
 from state_finder import get_state
 from utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info, interpret_pyla_code, \
@@ -85,6 +86,11 @@ class Play:
         self.last_movement = ''
         self.last_movement_change_time = time.time()
         self.minimum_movement_delay = bot_config["minimum_movement_delay"]
+        self.motion_tracker = MotionTracker()
+        self.dynamic_delay = DynamicDelay(
+            default=bot_config.get("aim_default_delay", self.minimum_movement_delay),
+            maximum=bot_config.get("aim_max_delay", 0.35),
+        )
         self.no_detection_proceed_delay = time_config["no_detection_proceed"]
         self.gadget_pixels_minimum = bot_config["gadget_pixels_minimum"]
         self.hypercharge_pixels_minimum = bot_config["hypercharge_pixels_minimum"]
@@ -534,7 +540,94 @@ class Play:
         target_y = y * scale * self.window_controller.height_ratio
         return target_x, target_y
 
+    def _frame_scale(self):
+        scale = getattr(self.window_controller, "scale_factor", None) or 1.0
+        try:
+            scale = float(scale)
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(scale) or scale <= 0:
+            return 1.0
+        return scale
+
+    def _observe_input_delay(self):
+        capture_latency = None
+        measure = getattr(self.window_controller, "measure_capture_latency", None)
+        if callable(measure):
+            try:
+                capture_latency = measure()
+            except Exception:
+                capture_latency = None
+        input_latency = getattr(self.window_controller, "last_input_latency", None)
+        self.dynamic_delay.observe(capture_latency, input_latency)
+
+    def _update_aim_state(self, data, current_time):
+        positions = []
+        for enemy in data.get("enemy") or []:
+            if enemy and len(enemy) >= 4:
+                positions.append(self.get_entity_pos(enemy))
+        self.motion_tracker.update(positions, current_time)
+        self._observe_input_delay()
+
+    def predict_aim(self, target_pos, target_velocity=None, skill_type="attack"):
+        player_box = None if not self.context else self.context.get("player_data")
+        if not player_box:
+            return aim_at_target(None, target_pos, skill=skill_type)
+        shooter = self.get_entity_pos(player_box)
+        if target_velocity is None:
+            target_velocity = self.motion_tracker.velocity_near(target_pos)
+        name = self.current_brawler
+        if not name and self.context:
+            name = self.context.get("brawler")
+        info = self.brawlers_info.get(name) or {} if name else {}
+        scale = self._frame_scale()
+        brawler_speed = info.get("speed", 720.0) or 720.0
+        try:
+            brawler_speed = float(brawler_speed) * scale
+        except (TypeError, ValueError):
+            brawler_speed = 720.0 * scale
+        shooter_velocity = stick_to_world_velocity(self.last_movement, brawler_speed)
+        max_range = None
+        try:
+            _safe_range, attack_range, super_range = self.get_brawler_range(name)
+            max_range = super_range if skill_type == "super" else attack_range
+        except Exception:
+            max_range = None
+        return aim_at_target(
+            shooter,
+            target_pos,
+            target_velocity=target_velocity,
+            shooter_velocity=shooter_velocity,
+            max_range=max_range,
+            latency=self.dynamic_delay.current(),
+            brawler=name,
+            brawler_info=info,
+            skill=skill_type,
+            scale=scale,
+        )
+
+    def aim_attack(self, solution):
+        return self._aim_skill(solution, "attack")
+
+    def aim_super(self, solution):
+        return self._aim_skill(solution, "super")
+
+    def _aim_skill(self, solution, origin):
+        if not isinstance(solution, dict) or not solution.get("feasible"):
+            return False
+        vector = solution.get("aim_vector") or (0.0, 0.0)
+        try:
+            dx = float(vector[0])
+            dy = float(vector[1])
+        except (TypeError, ValueError, IndexError):
+            return False
+        aimer = getattr(self.window_controller, "aim", None)
+        if not callable(aimer):
+            return False
+        return bool(aimer(dx, dy, origin_key=origin))
+
     def loop(self, brawler, data, current_time):
+        self._update_aim_state(data, current_time)
         self.context = {
                 'player_data': data['player'][0],
                 'enemy_data': data['enemy'],
@@ -577,7 +670,11 @@ class Play:
                 'rotate_movement': self.rotate_movement,
                 'normalize_move': self.normalize_move,
                 'width_ratio': self.window_controller.width_ratio,
-                'height_ratio': self.window_controller.height_ratio
+                'height_ratio': self.window_controller.height_ratio,
+                'predict_aim': self.predict_aim,
+                'aim_attack': self.aim_attack,
+                'aim_super': self.aim_super,
+                'current_aim_delay': self.dynamic_delay.current,
             }
         movement = self.get_movement()
         movement_vector = self.movement_to_vector(movement)
@@ -587,8 +684,9 @@ class Play:
             return None
         movement = self.clamp_movement(movement_vector)
         current_time = time.time()
+        movement_delay = self.dynamic_delay.current()
         if movement != self.last_movement:
-            if current_time - self.last_movement_change_time >= self.minimum_movement_delay:
+            if current_time - self.last_movement_change_time >= movement_delay:
                 self.last_movement = movement
                 self.last_movement_change_time = current_time
             else:

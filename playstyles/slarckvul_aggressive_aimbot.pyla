@@ -1,0 +1,101 @@
+{"name": "Slarckvul's Aggressive + Aimbot", "description": "Aggressive chase with predictive aim. Press the fight and keep shooting.", "brawlers": ["all"], "gamemodes": ["all"], "author": "Slarck-Steam", "date": "2026-09-22"}
+def vec_len(x, y):
+    return math.sqrt(x * x + y * y)
+
+def normalize_move(x, y, radius=JOYSTICK_RADIUS):
+    length = vec_len(x, y)
+    if length <= 0:
+        return (0, 0)
+    scale = radius / length
+    return (x * scale, y * scale)
+
+def is_blocked(move):
+    return is_path_blocked(player_data, move, walls)
+
+def first_unblocked(moves, fallback=None):
+    for move in moves:
+        if not is_blocked(move):
+            return move
+    if fallback is not None:
+        return fallback
+    if moves:
+        return moves[0]
+    return (0, 0)
+
+def move_toward(target_pos):
+    dx = target_pos[0] - player_pos[0]
+    dy = target_pos[1] - player_pos[1]
+    full = normalize_move(dx, dy)
+    return first_unblocked([full, normalize_move(dx, 0), normalize_move(0, dy)], full)
+
+def strafe_around(target_pos):
+    dx = target_pos[0] - player_pos[0]
+    dy = target_pos[1] - player_pos[1]
+    side = 1 if int(time.time() / 2) % 2 == 0 else -1
+    full = normalize_move(-dy * side, dx * side)
+    reverse = normalize_move(dy * side, -dx * side)
+    return first_unblocked([full, reverse], full)
+
+def aimed_shot_clear(solution, skill, enemy_coords):
+    if not solution or not solution.get("feasible") or not solution.get("in_range"):
+        return False
+    if solution.get("trajectory") in ("arc", "nani_super"):
+        return True
+    point = solution.get("aim_point") or enemy_coords
+    return is_enemy_hittable(player_pos, point, walls, skill)
+
+_brawler_name = brawler or current_brawler
+brawler_info = brawlers_info.get(_brawler_name)
+if not brawler_info:
+    raise ValueError(f"Brawler '{_brawler_name}' not found in brawlers_info.")
+
+persistent_data.setdefault("time_since_holding_attack", None)
+must_hold = must_brawler_hold_attack(_brawler_name, brawlers_info)
+safe_range, attack_range, super_range = get_brawler_range(_brawler_name)
+player_pos = get_entity_pos(player_data)
+movement = (0, 0)
+
+if must_hold and persistent_data["time_since_holding_attack"] is not None and time.time() - persistent_data["time_since_holding_attack"] >= brawler_info['hold_attack'] + seconds_to_hold_attack_after_reaching_max:
+    attack(touch_up=True, touch_down=False)
+    persistent_data["time_since_holding_attack"] = None
+
+if not is_there_enemy(enemy_data):
+    movement = (0, -JOYSTICK_RADIUS)
+else:
+    enemy_coords, enemy_distance = find_closest_enemy(enemy_data, player_pos, walls, "attack")
+    if enemy_coords is None:
+        movement = (0, -JOYSTICK_RADIUS)
+    else:
+        if enemy_distance > attack_range * 0.35:
+            movement = move_toward(enemy_coords)
+        else:
+            movement = strafe_around(enemy_coords)
+
+        if is_super_ready and persistent_data["time_since_holding_attack"] is None:
+            super_solution = predict_aim(enemy_coords, skill_type="super")
+            if aimed_shot_clear(super_solution, "super", enemy_coords):
+                if is_hypercharge_ready:
+                    use_hypercharge()
+                aim_super(super_solution)
+            elif is_enemy_hittable(player_pos, enemy_coords, walls, "super") and enemy_distance <= super_range + attack_range:
+                if is_hypercharge_ready:
+                    use_hypercharge()
+                use_super()
+
+        attack_solution = predict_aim(enemy_coords, skill_type="attack")
+        if aimed_shot_clear(attack_solution, "attack", enemy_coords):
+            if is_gadget_ready and persistent_data["time_since_holding_attack"] is None:
+                use_gadget()
+            aim_attack(attack_solution)
+        elif enemy_distance <= attack_range and is_enemy_hittable(player_pos, enemy_coords, walls, "attack"):
+            if is_gadget_ready and persistent_data["time_since_holding_attack"] is None:
+                use_gadget()
+            if not must_hold:
+                attack()
+            else:
+                if persistent_data["time_since_holding_attack"] is None:
+                    persistent_data["time_since_holding_attack"] = time.time()
+                    attack(touch_up=False, touch_down=True)
+                elif time.time() - persistent_data["time_since_holding_attack"] >= brawler_info['hold_attack']:
+                    attack(touch_up=True, touch_down=False)
+                    persistent_data["time_since_holding_attack"] = None

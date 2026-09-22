@@ -7,6 +7,7 @@ import time
 
 import scrcpy
 from adbutils import adb, AdbDevice
+from capture import create_capture_backend, normalize_backend_name
 from debug_view import DebugViewPublisher
 from utils import config_bool, load_toml_as_dict, save_dict_as_toml, invalidate_toml_cache
 
@@ -124,7 +125,11 @@ class WindowController:
         self.height_ratio = None
         self.movement_joystick_x, self.movement_joystick_y = None, None
         self.original_movement_joystick = (None, None)
-        self.BRAWL_STARS_PACKAGE = load_toml_as_dict("cfg/general_config.toml")["brawl_stars_package"]
+        general_config = load_toml_as_dict("cfg/general_config.toml")
+        self.BRAWL_STARS_PACKAGE = general_config["brawl_stars_package"]
+        self.capture_backend_name = str(general_config.get("capture_backend", "scrcpy") or "scrcpy")
+        self.frame_capture = None
+        self.last_input_latency = None
         self.verbose_debug = config_bool(
             load_toml_as_dict("cfg/debug_settings.toml").get("verbose_debug"),
             False
@@ -136,6 +141,8 @@ class WindowController:
 
             self.frame_lock = threading.Lock()
             self.max_fps = max_fps
+            self.frame_capture = self._build_frame_capture()
+            self.frame_capture.start()
             self.scrcpy_client = scrcpy.Client(device=self.device, max_width=0, bitrate=4000000) if self.max_fps == "auto" else scrcpy.Client(device=self.device, max_width=0, bitrate=4000000, max_fps=self.max_fps)
             self.last_frame = None
             self.last_frame_time = 0.0
@@ -164,11 +171,53 @@ class WindowController:
         self.PID_JOYSTICK = 1
         self.PID_ATTACK = 2
 
-    def get_latest_frame(self):
+    def _read_scrcpy_frame(self):
         with self.frame_lock:
             if self.last_frame is None:
                 return None, 0.0
             return self.last_frame, self.last_frame_time
+
+    def _build_frame_capture(self):
+        try:
+            backend_name = normalize_backend_name(self.capture_backend_name)
+        except ValueError:
+            print(f"Unknown capture backend '{self.capture_backend_name}', using scrcpy.")
+            backend_name = "scrcpy"
+            self.capture_backend_name = backend_name
+        if backend_name == "mumu":
+            return create_capture_backend("mumu")
+        return create_capture_backend("scrcpy", source=self._read_scrcpy_frame)
+
+    def get_latest_frame(self):
+        backend = getattr(self, "frame_capture", None)
+        if backend is not None and getattr(backend, "name", "") == "mumu":
+            try:
+                frame, frame_time = backend.grab()
+            except Exception:
+                frame, frame_time = None, 0.0
+            if frame is not None:
+                return frame, frame_time
+        if backend is not None and getattr(backend, "name", "") == "scrcpy":
+            try:
+                return backend.grab()
+            except Exception:
+                pass
+        if not hasattr(self, "frame_lock"):
+            return None, 0.0
+        return self._read_scrcpy_frame()
+
+    def measure_capture_latency(self, now=None):
+        _frame, frame_time = self.get_latest_frame()
+        if not frame_time:
+            return None
+        current = time.time() if now is None else now
+        try:
+            age = float(current) - float(frame_time)
+        except (TypeError, ValueError):
+            return None
+        if age < 0:
+            return 0.0
+        return age
 
     def force_rediscover(self) -> bool:
         print("Restarting ADB server and re-discovering device.")
@@ -372,12 +421,45 @@ class WindowController:
             self.last_joystick_pos = (None, None)
 
     def click(self, x: int, y: int, delay=0.02, already_include_ratio=True, touch_up=True, touch_down=True):
+        started = time.perf_counter()
         if not already_include_ratio:
             x = x * self.width_ratio
             y = y * self.height_ratio
         if touch_down: self.touch_down(x, y, pointer_id=self.PID_ATTACK)
         time.sleep(delay)
         if touch_up: self.touch_up(x, y, pointer_id=self.PID_ATTACK)
+        self.last_input_latency = time.perf_counter() - started
+
+    def aim(self, dx, dy, origin_key="attack", radius=120.0):
+        """Drag from an action button toward a world-space aim vector."""
+        if origin_key not in press_coords_dict:
+            return False
+        width_ratio = self.width_ratio or 1
+        height_ratio = self.height_ratio or 1
+        origin_x, origin_y = press_coords_dict[origin_key]
+        origin_x *= width_ratio
+        origin_y *= height_ratio
+        try:
+            dx = float(dx)
+            dy = float(dy)
+        except (TypeError, ValueError):
+            return False
+        length = math.hypot(dx, dy)
+        started = time.perf_counter()
+        if length < 1:
+            self.press(origin_key)
+            self.last_input_latency = time.perf_counter() - started
+            return True
+        scale = (float(radius) * (self.scale_factor or 1)) / length
+        self.swipe(
+            origin_x,
+            origin_y,
+            origin_x + dx * scale,
+            origin_y + dy * scale,
+            duration=0.03,
+        )
+        self.last_input_latency = time.perf_counter() - started
+        return True
 
     def press(self, key, delay=0.02, touch_up=True, touch_down=True):
         if key not in press_coords_dict:
