@@ -25,5 +25,7 @@ base_size = 1024
 image_size = 768
 crop_mode = true
 scale_down_factor = 0.8
+timeout_seconds = 8.0
+result_max_age = 3.0
 
 

@@ -94,11 +94,20 @@ class LobbyAutomation:
 
             print("Extracting text on current screen with DeepSeek OCR v2...")
             try:
-                results = extract_text_and_positions(screenshot, self.ocr_reader)
+                if isinstance(self.ocr_reader, DeepSeekOCRv2):
+                    document = self.ocr_reader.read_brawler_sync(screenshot, target_names)
+                    results = {}
+                    for item in document["menu_text"]:
+                        bbox = item["bbox"]
+                        results[item["text"].lower()] = {
+                            "center": ((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2),
+                        }
+                else:
+                    results = extract_text_and_positions(screenshot, self.ocr_reader)
             except LobbyOCRError as exc:
-                raise RuntimeError(
-                    f"Automatic brawler selection could not start OCR: {exc}"
-                ) from exc
+                print(f"WARNING: Automatic brawler selection could not start OCR: {exc}")
+                print("The bot will continue without changing the currently selected brawler.")
+                return "error"
             except Exception as exc:
                 print(f"WARNING: Automatic brawler selection could not read this screen with OCR: {exc}")
                 print("The bot will continue without changing the currently selected brawler.")

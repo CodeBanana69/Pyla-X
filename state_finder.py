@@ -3,6 +3,7 @@ import sys
 import cv2
 import time
 sys.path.append(os.path.abspath('/'))
+from lobby_ocr import get_lobby_ocr_client, label_center
 from utils import load_toml_as_dict, config_bool
 
 last_debug_print_time = 0.0
@@ -192,11 +193,61 @@ def is_in_star_drop(image):
     return False
 
 
-def is_underdog(image):
+def is_underdog_template(image):
     return is_template_in_region(image, end_results_path + "underdog.png", region_data['underdog'])
 
 
-def get_state(screenshot):
-    state = get_in_game_state(screenshot)
-    if config_bool(load_toml_as_dict("cfg/debug_settings.toml").get('state_finder_debug'), False): cv2.imwrite(f"./debug_frames/state_screenshot_{state}_{len(os.listdir('./debug_frames'))}.png", cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB))
+def _menu_document(image, reader=None):
+    client = reader if reader is not None else get_lobby_ocr_client()
+    try:
+        if hasattr(client, "read_screen_nowait"):
+            return client.read_screen_nowait(image)
+        if hasattr(client, "read_screen_sync"):
+            return client.read_screen_sync(image)
+    except Exception as exc:
+        print(f"Menu OCR failed, using template fallback: {exc}")
+    return None
+
+
+def _usable_screen(document):
+    if not isinstance(document, dict):
+        return None
+    if document.get("source") != "deepseek-ocr-2":
+        return None
+    screen = document.get("screen")
+    if screen in (None, "unknown"):
+        return None
+    return screen
+
+
+def is_underdog(image, reader=None):
+    # OCR first. The underdog template is the fallback when the read is missing.
+    document = _menu_document(image, reader)
+    if _usable_screen(document):
+        return bool(document.get("underdog"))
+    try:
+        return is_underdog_template(image)
+    except Exception as exc:
+        print(f"Underdog template fallback failed: {exc}")
+        return False
+
+
+def find_popup_close(image, reader=None):
+    """Close-button center from menu OCR, or None so the caller can use its template."""
+    return label_center(_menu_document(image, reader), ("close",))
+
+
+def get_state(screenshot, reader=None):
+    # 1. Fresh DeepSeek-OCR-2 screen schema, when the async read has finished.
+    # 2. Existing template regions when OCR is missing, stale, unknown, or failed.
+    # 3. "match" if template matching itself throws, so the bot loop keeps running.
+    state = _usable_screen(_menu_document(screenshot, reader))
+    if state is None:
+        try:
+            state = get_in_game_state(screenshot)
+        except Exception as exc:
+            print(f"Template state fallback failed, using match: {exc}")
+            state = "match"
+    if config_bool(load_toml_as_dict("cfg/debug_settings.toml").get('state_finder_debug'), False):
+        cv2.imwrite(f"./debug_frames/state_screenshot_{state}_{len(os.listdir('./debug_frames'))}.png", cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB))
     return state

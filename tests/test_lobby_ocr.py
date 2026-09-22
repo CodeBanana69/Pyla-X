@@ -1,4 +1,6 @@
+import asyncio
 import os
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -9,11 +11,15 @@ from lobby_automation import LobbyAutomation
 from lobby_ocr import (
     DEFAULT_LOBBY_OCR_MODEL_ID,
     LOBBY_OCR_PROMPT,
+    LobbyOCRError,
     DeepSeekOCRv2,
     extract_text_and_positions,
     grounding_to_readtext,
     lobby_ocr_settings,
+    validate_brawler_read,
+    validate_screen_read,
 )
+from state_finder import find_popup_close, get_state, is_underdog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,6 +123,150 @@ class LobbyOcrTests(unittest.TestCase):
             self.assertNotIn("deepseek", lowered)
             self.assertNotIn("easyocr", lowered)
             self.assertNotIn("lobby_ocr", lowered)
+
+
+def _screen(screen, menu_text=None, underdog=False):
+    match_result = screen[4:] if screen.startswith("end_") else None
+    star_drop = screen[len("star_drop_"):] if screen.startswith("star_drop_") else None
+    return {
+        "screen": screen,
+        "menu_text": menu_text or [],
+        "brawler_name": None,
+        "match_result": match_result,
+        "star_drop": star_drop,
+        "underdog": underdog,
+        "source": "deepseek-ocr-2",
+    }
+
+
+class MenuStateClientTests(unittest.TestCase):
+    def test_schema_accepts_screen_and_rejects_unknown(self):
+        payload = validate_screen_read(_screen("end_victory", [{
+            "text": "victory",
+            "bbox": [0, 0, 10, 4],
+            "confidence": 1.0,
+        }]))
+        self.assertEqual(payload["match_result"], "victory")
+        brawler = validate_brawler_read({
+            "brawler_name": "shelly",
+            "center": [4, 8],
+            "menu_text": payload["menu_text"],
+            "source": "deepseek-ocr-2",
+        })
+        self.assertEqual(brawler["center"], [4, 8])
+        broken = _screen("combat")
+        with self.assertRaises(LobbyOCRError):
+            validate_screen_read(broken)
+
+    def test_async_read_screen_parses_grounding_into_schema(self):
+        reader = DeepSeekOCRv2()
+        reader._infer_sync = lambda image: '<|ref|>victory<|/ref|><|det|>[[0, 0, 999, 999]]<|/det|>'
+
+        payload = asyncio.run(reader.read_screen(np.zeros((20, 40, 3), dtype=np.uint8)))
+
+        self.assertEqual(payload["screen"], "end_victory")
+        self.assertEqual(payload["match_result"], "victory")
+        self.assertEqual(payload["source"], "deepseek-ocr-2")
+        self.assertEqual(payload["menu_text"][0]["bbox"], [0, 0, 40, 20])
+        self.assertFalse(payload["underdog"])
+
+    def test_async_read_brawler_returns_center(self):
+        reader = DeepSeekOCRv2()
+        reader._infer_sync = lambda image: '<|ref|>shelly<|/ref|><|det|>[[0, 0, 499, 499]]<|/det|>'
+
+        payload = asyncio.run(reader.read_brawler(np.zeros((10, 20, 3), dtype=np.uint8), {"shelly"}))
+
+        self.assertEqual(payload["brawler_name"], "shelly")
+        self.assertEqual(payload["center"], [4, 2])
+
+    def test_nowait_does_not_block_and_later_returns_schema(self):
+        reader = DeepSeekOCRv2(timeout_seconds=2, result_max_age=3)
+
+        def slow(image):
+            time.sleep(0.2)
+            return '<|ref|>victory<|/ref|><|det|>[[0, 0, 999, 999]]<|/det|>'
+
+        reader._infer_sync = slow
+        started = time.perf_counter()
+        first = reader.read_screen_nowait(np.zeros((8, 8, 3), dtype=np.uint8))
+        self.assertIsNone(first)
+        self.assertLess(time.perf_counter() - started, 0.15)
+        deadline = time.perf_counter() + 2
+        second = None
+        while time.perf_counter() < deadline:
+            second = reader.read_screen_nowait(np.zeros((8, 8, 3), dtype=np.uint8))
+            if second is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(second)
+        self.assertEqual(second["screen"], "end_victory")
+
+    def test_blocking_read_times_out_without_raising_past_the_client(self):
+        reader = DeepSeekOCRv2(timeout_seconds=0.05)
+
+        def slow(image):
+            time.sleep(0.4)
+            return '<|ref|>shelly<|/ref|><|det|>[[0, 0, 10, 10]]<|/det|>'
+
+        reader._infer_sync = slow
+        with self.assertRaises(LobbyOCRError):
+            reader.read_brawler_sync(np.zeros((8, 8, 3), dtype=np.uint8), {"shelly"})
+
+    def test_state_uses_ocr_and_falls_back_to_templates(self):
+        image = np.zeros((12, 12, 3), dtype=np.uint8)
+        client = MagicMock()
+        client.read_screen_nowait.return_value = _screen("shop")
+        with patch("state_finder.get_in_game_state") as fallback:
+            self.assertEqual(get_state(image, reader=client), "shop")
+        fallback.assert_not_called()
+
+        client.read_screen_nowait.return_value = None
+        with patch("state_finder.get_in_game_state", return_value="lobby") as fallback:
+            self.assertEqual(get_state(image, reader=client), "lobby")
+        fallback.assert_called_once()
+
+        client.read_screen_nowait.return_value = _screen("unknown")
+        with patch("state_finder.get_in_game_state", return_value="popup") as fallback:
+            self.assertEqual(get_state(image, reader=client), "popup")
+        fallback.assert_called_once()
+
+        client.read_screen_nowait.side_effect = RuntimeError("down")
+        with patch("state_finder.get_in_game_state", side_effect=RuntimeError("templates")):
+            self.assertEqual(get_state(image, reader=client), "match")
+
+    def test_underdog_and_popup_prefer_ocr_then_template(self):
+        image = np.zeros((12, 12, 3), dtype=np.uint8)
+        client = MagicMock()
+        client.read_screen_nowait.return_value = _screen("end_defeat", underdog=True)
+        with patch("state_finder.is_underdog_template") as template:
+            self.assertTrue(is_underdog(image, reader=client))
+        template.assert_not_called()
+
+        client.read_screen_nowait.return_value = None
+        with patch("state_finder.is_underdog_template", return_value=True) as template:
+            self.assertTrue(is_underdog(image, reader=client))
+        template.assert_called_once()
+
+        client.read_screen_nowait.return_value = _screen("popup", [{
+            "text": "close",
+            "bbox": [10, 20, 30, 40],
+            "confidence": 1,
+        }])
+        self.assertEqual(find_popup_close(image, reader=client), (20, 30))
+        client.read_screen_nowait.return_value = None
+        self.assertIsNone(find_popup_close(image, reader=client))
+
+    def test_brawler_selection_survives_ocr_failure(self):
+        window = MagicMock()
+        window.width_ratio = 1
+        window.height_ratio = 1
+        window.screenshot.return_value = np.zeros((40, 40, 3), dtype=np.uint8)
+        reader = DeepSeekOCRv2()
+        reader.read_brawler_sync = MagicMock(side_effect=LobbyOCRError("unavailable"))
+        lobby = LobbyAutomation(window, ocr_reader=reader)
+        with patch("lobby_automation.time.sleep", return_value=None):
+            result = lobby.select_brawler("shelly", lambda: "brawler_selection")
+        self.assertEqual(result, "error")
 
 
 if __name__ == "__main__":
