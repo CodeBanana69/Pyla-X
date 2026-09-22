@@ -2,7 +2,7 @@ import sys
 import time
 import cv2
 
-from state_finder import get_state, is_underdog
+from state_finder import find_popup_close, get_state, is_underdog
 from trophy_observer import TrophyObserver, MatchResult
 from utils import find_template_center, load_toml_as_dict, notify_user, save_brawler_data
 
@@ -250,6 +250,10 @@ class StageManager:
 
     def close_pop_up(self):
         screenshot = self.window_controller.screenshot()
+        popup_location = find_popup_close(screenshot)
+        if popup_location:
+            self.window_controller.click(*popup_location)
+            return
         if self.close_popup_icon is None:
             self.close_popup_icon = load_image("images/states/close_popup.png", self.window_controller.scale_factor)
         if self.close_popup_icon is None:
