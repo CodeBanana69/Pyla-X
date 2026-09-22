@@ -19,4 +19,11 @@ hypercharge=[1350, 940, 1450, 1050]
 [hsv_bounds]
 idle_reconnect_high_bounds = [[10, 22, 42], [10, 22, 90], [118, 66, 46]]
 
+[ocr]
+model_id = "deepseek-ai/DeepSeek-OCR-2"
+base_size = 1024
+image_size = 768
+crop_mode = true
+scale_down_factor = 0.8
+
 
