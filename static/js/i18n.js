@@ -924,6 +924,7 @@
     const RU = Object.fromEntries(Object.keys(FR).map((key, index) => [key, RU_VALUES[index] || key]));
 
     Object.assign(FR, {
+        "Save MP4 clips of clean gameplay when the player is tracked and then lost. Debug overlays are never included.": "Enregistrer des clips MP4 de la partie, sans incrustation de débogage, lorsque le joueur est suivi puis perdu.",
         "Force Pause Now": "Forcer la pause maintenant",
         "Force Pause Requested…": "Pause forcée demandée…",
         "Force Stop Now": "Forcer l’arrêt maintenant",
@@ -935,6 +936,17 @@
     });
 
     Object.assign(RU, {
+        "Filter match history by date": "Фильтровать историю матчей по дате",
+        "From date": "Дата начала",
+        "To date": "Дата окончания",
+        "Date range": "Диапазон дат",
+        "Apply dates": "Применить даты",
+        "Dates are inclusive.": "Даты включительно.",
+        "Date filter applied.": "Фильтр по дате применён.",
+        "Date filter cleared.": "Фильтр по дате сброшен.",
+        "The start date must be on or before the end date.": "Дата начала должна быть не позже даты окончания.",
+        "No matches were recorded in the selected date range.": "В выбранном диапазоне дат матчей нет.",
+        "Save MP4 clips of clean gameplay when the player is tracked and then lost. Debug overlays are never included.": "Сохранять MP4-клипы чистого геймплея, когда игрок сначала найден, а затем потерян. Отладочные наложения не записываются.",
         "Force Pause Now": "Поставить на паузу сейчас",
         "Force Pause Requested…": "Запрошена мгновенная пауза…",
         "Force Stop Now": "Остановить сейчас",

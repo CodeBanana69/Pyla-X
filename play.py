@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 import os
 
+from clip_recorder import NormalClipRecorder
 from detect import Detect
 from state_finder import get_state
 from utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info, interpret_pyla_code, \
@@ -56,7 +57,15 @@ class Play:
 
         bot_config = load_toml_as_dict("cfg/bot_config.toml")
         time_config = load_toml_as_dict("cfg/time_tresholds.toml")
-        self.verbose_debug = config_bool(load_toml_as_dict("cfg/debug_settings.toml").get('verbose_debug'), False)
+        debug_config = load_toml_as_dict("cfg/debug_settings.toml")
+        self.verbose_debug = config_bool(debug_config.get('verbose_debug'), False)
+        self.normal_clip_recorder = None
+        if config_bool(debug_config.get("record_normal_clips"), False):
+            try:
+                clip_fps = float(debug_config.get("debug_view_fps", 30) or 30)
+            except (TypeError, ValueError):
+                clip_fps = 30.0
+            self.normal_clip_recorder = NormalClipRecorder(fps=clip_fps)
         if self.verbose_debug:
             if not os.path.exists("debug_frames"):
                 os.makedirs("debug_frames")
@@ -749,7 +758,24 @@ class Play:
 
         self.window_controller.debug_view.publish(frame, debug_data)
 
+    def _runtime_interrupts(self, main):
+        runtime = getattr(main, "runtime_control", None)
+        if runtime is None or not runtime.interrupts_immediately():
+            return False
+        return runtime.should_stop() or runtime.should_pause()
+
+    def _record_clean_gameplay(self, frame, data):
+        recorder = self.normal_clip_recorder
+        if recorder is None or frame is None:
+            return
+        player_boxes = (data or {}).get("player") or []
+        recorder.record_gameplay(frame, player_boxes)
+
     def main(self, frame, brawler, main):
+        if self._runtime_interrupts(main):
+            self.window_controller.release_movement()
+            return
+
         current_time = time.time()
         state = main.get_latest_state()
         data = self.get_main_data(frame)
@@ -772,6 +798,7 @@ class Play:
             if state != "match":
                 data = None
 
+        self._record_clean_gameplay(frame, data)
         if not data:
             if current_time - self.time_since_player_last_found > 1.0:
                 self.window_controller.release_movement()
@@ -799,6 +826,9 @@ class Play:
             self.time_since_super_checked = current_time
         self.frame = frame
         movement = self.loop(brawler, data, current_time)
+        if self._runtime_interrupts(main):
+            self.window_controller.release_movement()
+            return
         self.publish_debug_view(frame, data, state, movement)
         if movement is not None:
             self.do_movement(movement)

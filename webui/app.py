@@ -280,15 +280,25 @@ def create_app(pyla_main, start_discord_bot=False):
     def runtime_status():
         return jsonify({"ok": True, "runtime": runtime_manager.get_status()})
 
+    def request_is_immediate() -> bool:
+        payload = request.get_json(silent=True) or {}
+        if isinstance(payload, dict) and "immediate" in payload:
+            value = payload.get("immediate")
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+        query = str(request.args.get("immediate", "")).strip().lower()
+        return query in {"1", "true", "yes", "on"}
+
     @app.post("/api/runtime/pause")
     def runtime_pause():
-        result = runtime_manager.pause()
+        result = runtime_manager.pause(immediate=request_is_immediate())
         status_code = 200 if result.get("ok") else 409
         return jsonify({**result, "runtime": runtime_manager.get_status()}), status_code
 
     @app.post("/api/runtime/stop")
     def runtime_stop():
-        result = runtime_manager.stop()
+        result = runtime_manager.stop(immediate=request_is_immediate())
         status_code = 200 if result.get("ok") else 409
         return jsonify({**result, "runtime": runtime_manager.get_status()}), status_code
 
