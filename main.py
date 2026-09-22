@@ -369,12 +369,62 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                         print("Reconnect failed -- restarting Brawl Stars")
                         self.restart_brawl_stars()
 
+        def publish_live_session(self):
+            publisher = getattr(discord_bot, "publish_session", None)
+            if publisher is None or not self.Stage_manager.brawlers_pick_data:
+                return
+            try:
+                from datetime import datetime
+
+                observer = self.Stage_manager.Trophy_observer
+                brawler_data = self.Stage_manager.brawlers_pick_data[0]
+                started_at = None
+                primary = discord_bot.primary_instance() if hasattr(discord_bot, "primary_instance") else None
+                runtime = getattr(primary, "runtime_manager", None)
+                if runtime is not None and hasattr(runtime, "get_status"):
+                    started_at = runtime.get_status().get("session_started_at")
+
+                wins = None
+                losses = None
+                if started_at:
+                    wins = 0
+                    losses = 0
+                    for match in observer.match_history or []:
+                        played_at = match.get("date_time")
+                        try:
+                            played_stamp = datetime.fromisoformat(str(played_at)).timestamp()
+                        except (TypeError, ValueError):
+                            continue
+                        if played_stamp < float(started_at):
+                            continue
+                        result = str(match.get("result", "")).lower()
+                        if result == "victory":
+                            wins += 1
+                        elif result == "defeat":
+                            losses += 1
+
+                mode = None
+                if isinstance(self.playstyle_info, dict):
+                    gamemodes = self.playstyle_info.get("gamemodes") or []
+                    mode = gamemodes[0] if gamemodes else self.playstyle_info.get("name")
+
+                publisher({
+                    "trophies": observer.current_trophies,
+                    "wins": wins,
+                    "losses": losses,
+                    "current_brawler": brawler_data.get("brawler"),
+                    "mode": mode,
+                })
+            except Exception as exc:
+                print(f"Could not publish live session stats: {exc}")
+
         def main(self):
             s_time = time.time()
             c = 0
             self.time_since_last_webhook_ping = time.time()
             if self.runtime_control:
                 self.runtime_control.mark_running()
+            self.publish_live_session()
 
             while True:
                 if self.get_latest_state() == "lobby":
@@ -437,6 +487,7 @@ def pyla_main(discord_bot, queue_data, stop_event=None, runtime_control=None):
                         print(f"{c / elapsed:.2f} FPS")
                     s_time = t_now
                     c = 0
+                    self.publish_live_session()
                 self.check_and_handle_brawl_stars_crash()
                 frame = self.window_controller.screenshot()
 
