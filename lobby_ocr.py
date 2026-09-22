@@ -98,11 +98,21 @@ def _bool(value, default):
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+ATTENTION_IMPLEMENTATIONS = ("flash_attention_2", "sdpa", "eager")
+# Remote DeepSeek-OCR-2 code only registers flash_attention_2 and eager.
+# SDPA is tried first on AMD and retried as eager when that class is missing.
+_AUTO_ATTENTION = {
+    "nvidia": ("flash_attention_2", "eager"),
+    "rocm": ("sdpa", "eager"),
+}
+
+
 def lobby_ocr_settings():
     section = load_toml_as_dict("cfg/lobby_config.toml").get("ocr", {})
     model_id = os.environ.get("DEEPSEEK_OCR_MODEL", "").strip() or section.get("model_id") or DEFAULT_LOBBY_OCR_MODEL_ID
     timeout = os.environ.get("DEEPSEEK_OCR_TIMEOUT", "").strip() or section.get("timeout_seconds", LOBBY_OCR_TIMEOUT_SECONDS)
     max_age = os.environ.get("DEEPSEEK_OCR_RESULT_MAX_AGE", "").strip() or section.get("result_max_age", LOBBY_OCR_RESULT_MAX_AGE)
+    attn = os.environ.get("DEEPSEEK_OCR_ATTN", "").strip() or str(section.get("attn_implementation") or "").strip()
     try:
         scale = float(section.get("scale_down_factor", 0.8))
     except (TypeError, ValueError):
@@ -117,7 +127,92 @@ def lobby_ocr_settings():
         "scale_down_factor": scale,
         "timeout_seconds": _positive_float(timeout, LOBBY_OCR_TIMEOUT_SECONDS),
         "result_max_age": _positive_float(max_age, LOBBY_OCR_RESULT_MAX_AGE),
+        "attn_implementation": attn or None,
     }
+
+
+def attention_try_order(backend, attn_override=None):
+    auto = list(_AUTO_ATTENTION.get(backend, ("eager",)))
+    override = str(attn_override or "").strip().lower() or None
+    if override not in ATTENTION_IMPLEMENTATIONS:
+        override = None
+    if not override:
+        return auto
+    return [override] + [item for item in auto if item != override]
+
+
+def select_ocr_load_plan(torch_module, attn_override=None):
+    """Choose attention and dtype without touching a real GPU.
+
+    ROCm builds set torch.version.hip and still expose the CUDA device API.
+    FlashAttention 2 is CUDA-only, so AMD never requests it unless an override asks.
+    """
+    hip = getattr(getattr(torch_module, "version", None), "hip", None)
+    backend = "rocm" if hip else "nvidia"
+    cuda = getattr(torch_module, "cuda", None)
+    try:
+        device_available = bool(cuda is not None and cuda.is_available())
+    except Exception:
+        device_available = False
+    if not device_available:
+        return {
+            "backend": "none",
+            "attention": [],
+            "dtype": None,
+            "device_available": False,
+        }
+    if backend == "rocm":
+        bf16_supported = False
+        checker = getattr(cuda, "is_bf16_supported", None)
+        if callable(checker):
+            try:
+                bf16_supported = bool(checker())
+            except Exception:
+                bf16_supported = False
+        dtype = torch_module.bfloat16 if bf16_supported else torch_module.float16
+    else:
+        dtype = torch_module.bfloat16
+    return {
+        "backend": backend,
+        "attention": attention_try_order(backend, attn_override),
+        "dtype": dtype,
+        "device_available": True,
+    }
+
+
+def load_deepseek_ocr_model(model_id, torch_module, from_pretrained, attn_override=None):
+    """Load the official model, retrying attention implementations the remote code rejects."""
+    plan = select_ocr_load_plan(torch_module, attn_override)
+    if not plan["device_available"]:
+        raise LobbyOCRError(
+            "DeepSeek OCR v2 requires a CUDA or ROCm GPU. Menu reads will use the template fallback."
+        )
+    last_error = None
+    model = None
+    used = None
+    for impl in plan["attention"]:
+        try:
+            model = from_pretrained(
+                model_id,
+                _attn_implementation=impl,
+                trust_remote_code=True,
+                use_safetensors=True,
+            )
+            used = impl
+            break
+        except Exception as exc:
+            last_error = exc
+            print(f"DeepSeek OCR v2 could not load attention '{impl}': {exc}")
+    if model is None:
+        raise LobbyOCRError(f"DeepSeek OCR v2 failed to load {model_id}: {last_error}") from last_error
+    try:
+        model = model.eval().cuda().to(plan["dtype"])
+    except Exception as exc:
+        raise LobbyOCRError(
+            f"DeepSeek OCR v2 failed to move {model_id} onto the GPU: {exc}"
+        ) from exc
+    plan["attention_used"] = used
+    return model, plan
 
 
 def get_lobby_ocr_client():
@@ -336,7 +431,7 @@ def extract_text_and_positions(image, reader):
 class DeepSeekOCRv2:
     """Async DeepSeek-OCR-2 client for menu text, brawler names, and screen state."""
 
-    def __init__(self, model_id=None, prompt=None, base_size=None, image_size=None, crop_mode=None, timeout_seconds=None, result_max_age=None):
+    def __init__(self, model_id=None, prompt=None, base_size=None, image_size=None, crop_mode=None, timeout_seconds=None, result_max_age=None, attn_implementation=None):
         settings = lobby_ocr_settings()
         self.model_id = model_id or settings["model_id"]
         self.prompt = prompt or settings["prompt"]
@@ -345,6 +440,7 @@ class DeepSeekOCRv2:
         self.crop_mode = settings["crop_mode"] if crop_mode is None else crop_mode
         self.timeout_seconds = settings["timeout_seconds"] if timeout_seconds is None else timeout_seconds
         self.result_max_age = settings["result_max_age"] if result_max_age is None else result_max_age
+        self.attn_implementation = settings["attn_implementation"] if attn_implementation is None else attn_implementation
         self._model = None
         self._tokenizer = None
         self._load_failed = False
@@ -368,6 +464,7 @@ class DeepSeekOCRv2:
             crop_mode=settings["crop_mode"],
             timeout_seconds=settings["timeout_seconds"],
             result_max_age=settings["result_max_age"],
+            attn_implementation=settings["attn_implementation"],
         )
 
     def _ensure_background_loop(self):
@@ -423,18 +520,24 @@ class DeepSeekOCRv2:
                     ) from exc
                 try:
                     tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-                    model = AutoModel.from_pretrained(
+                    model, plan = load_deepseek_ocr_model(
                         self.model_id,
-                        _attn_implementation="flash_attention_2",
-                        trust_remote_code=True,
-                        use_safetensors=True,
+                        torch,
+                        AutoModel.from_pretrained,
+                        attn_override=self.attn_implementation,
                     )
-                    model = model.eval().cuda().to(torch.bfloat16)
+                except LobbyOCRError:
+                    self._load_failed = True
+                    raise
                 except Exception as exc:
                     self._load_failed = True
                     raise LobbyOCRError(
                         f"DeepSeek OCR v2 failed to load {self.model_id}: {exc}"
                     ) from exc
+                print(
+                    f"DeepSeek OCR v2 loaded on {plan['backend']} "
+                    f"with {plan['attention_used']}."
+                )
                 self._tokenizer = tokenizer
                 self._model = model
         return self._model, self._tokenizer

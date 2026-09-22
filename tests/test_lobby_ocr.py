@@ -15,7 +15,9 @@ from lobby_ocr import (
     DeepSeekOCRv2,
     extract_text_and_positions,
     grounding_to_readtext,
+    load_deepseek_ocr_model,
     lobby_ocr_settings,
+    select_ocr_load_plan,
     validate_brawler_read,
     validate_screen_read,
 )
@@ -267,6 +269,91 @@ class MenuStateClientTests(unittest.TestCase):
         with patch("lobby_automation.time.sleep", return_value=None):
             result = lobby.select_brawler("shelly", lambda: "brawler_selection")
         self.assertEqual(result, "error")
+
+
+class _FakeCuda:
+    def __init__(self, available=True, bf16=True):
+        self._available = available
+        self._bf16 = bf16
+
+    def is_available(self):
+        return self._available
+
+    def is_bf16_supported(self):
+        return self._bf16
+
+
+class _FakeTorch:
+    def __init__(self, hip=None, available=True, bf16=True):
+        self.version = type("Version", (), {"hip": hip})()
+        self.cuda = _FakeCuda(available, bf16)
+        self.bfloat16 = "bfloat16"
+        self.float16 = "float16"
+
+
+class _FakeWeights:
+    def __init__(self):
+        self.dtype = None
+        self.moved_to_cuda = False
+
+    def eval(self):
+        return self
+
+    def cuda(self):
+        self.moved_to_cuda = True
+        return self
+
+    def to(self, dtype):
+        self.dtype = dtype
+        return self
+
+
+class GpuLoadPlanTests(unittest.TestCase):
+    def test_nvidia_selects_flash_attention_and_bfloat16(self):
+        plan = select_ocr_load_plan(_FakeTorch(hip=None, bf16=False))
+        self.assertEqual(plan["backend"], "nvidia")
+        self.assertEqual(plan["attention"][0], "flash_attention_2")
+        self.assertEqual(plan["dtype"], "bfloat16")
+        self.assertTrue(plan["device_available"])
+
+    def test_amd_rocm_skips_flash_attention(self):
+        plan = select_ocr_load_plan(_FakeTorch(hip="6.2.41133", bf16=True))
+        self.assertEqual(plan["backend"], "rocm")
+        self.assertEqual(plan["attention"], ["sdpa", "eager"])
+        self.assertNotIn("flash_attention_2", plan["attention"])
+        self.assertEqual(plan["dtype"], "bfloat16")
+
+    def test_amd_without_bf16_selects_float16(self):
+        plan = select_ocr_load_plan(_FakeTorch(hip="6.2.41133", bf16=False))
+        self.assertEqual(plan["dtype"], "float16")
+        self.assertNotIn("flash_attention_2", plan["attention"])
+
+    def test_amd_sdpa_rejection_retries_eager(self):
+        seen = []
+
+        def from_pretrained(model_id, _attn_implementation, trust_remote_code, use_safetensors):
+            seen.append(_attn_implementation)
+            self.assertTrue(trust_remote_code)
+            self.assertTrue(use_safetensors)
+            self.assertEqual(model_id, DEFAULT_LOBBY_OCR_MODEL_ID)
+            if _attn_implementation == "sdpa":
+                raise KeyError("mha_sdpa")
+            return _FakeWeights()
+
+        model, plan = load_deepseek_ocr_model(
+            DEFAULT_LOBBY_OCR_MODEL_ID,
+            _FakeTorch(hip="6.2.41133", bf16=False),
+            from_pretrained,
+        )
+        self.assertEqual(seen, ["sdpa", "eager"])
+        self.assertNotIn("flash_attention_2", seen)
+        self.assertEqual(plan["attention_used"], "eager")
+        self.assertTrue(model.moved_to_cuda)
+        self.assertEqual(model.dtype, "float16")
+
+    def test_missing_gpu_raises_for_template_fallback(self):
+        with self.assertRaises(LobbyOCRError):
+            load_deepseek_ocr_model("deepseek-ai/DeepSeek-OCR-2", _FakeTorch(available=False), lambda *args, **kwargs: None)
 
 
 if __name__ == "__main__":
